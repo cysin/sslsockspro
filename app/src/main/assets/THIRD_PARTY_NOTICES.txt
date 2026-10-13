@@ -1,0 +1,33 @@
+SSLSocks Pro is GPL-3.0-or-later software.
+Source: https://github.com/cysin/sslsockspro
+
+stunnel 5.82 — Michal Trojnara and contributors.
+GPL-2.0-or-later with the upstream OpenSSL linking exception.
+https://www.stunnel.org/
+
+OpenSSL 4.0.3 — The OpenSSL Project Authors.
+Apache License 2.0. https://www.openssl.org/
+
+OpenVPN 2.7.8 — OpenVPN Inc. and contributors.
+GPL-2.0 with the upstream OpenSSL exception.
+https://github.com/OpenVPN/openvpn
+
+Android management integration follows OpenVPN for Android 0.7.68.
+Copyright 2012–2026 Arne Schwabe and contributors.
+GPL-2.0-or-later with upstream OpenSSL/Apache linking exceptions.
+https://github.com/schwabe/ics-openvpn
+
+HevSocks5Tunnel 2.18.0 and HevTaskSystem — hev and contributors.
+MIT License. https://github.com/heiher/hev-socks5-tunnel
+lwIP — Swedish Institute of Computer Science and contributors, BSD-3-Clause.
+libyaml fork — hev and upstream contributors, MIT License.
+LZ4 1.10.0 — Yann Collet and contributors, BSD-2-Clause.
+
+AndroidX, Compose, Kotlin, kotlinx.coroutines, kotlinx.serialization,
+OkHttp, and Apache Commons Compress — Apache License 2.0.
+dnsjava — dnsjava contributors, BSD-3-Clause.
+Bouncy Castle — The Legion of the Bouncy Castle, MIT License.
+
+Full license texts are included in the app's licenses assets and the source
+distribution. Exact native source versions and SHA-256 digests are listed in
+native-dependencies.json; dependency versions are pinned in Gradle.

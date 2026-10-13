@@ -1,0 +1,3 @@
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.MustBeClosed
+-keep class io.github.cysin.sslsockspro.**Test { *; }

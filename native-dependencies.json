@@ -1,0 +1,66 @@
+{
+  "stunnel": {
+    "version": "5.82",
+    "filename": "stunnel-5.82.tar.gz",
+    "url": "https://www.stunnel.org/downloads/stunnel-5.82.tar.gz",
+    "sha256": "8e7438ccd6b3a2ab05182d0846e112a56a7f557ecdee40de07bf67820008bef7"
+  },
+  "openssl": {
+    "version": "4.0.3",
+    "filename": "openssl-4.0.3.tar.gz",
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz",
+    "sha256": "325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9"
+  },
+  "openvpn": {
+    "version": "2.7.8",
+    "filename": "openvpn-2.7.8.tar.gz",
+    "url": "https://build.openvpn.net/downloads/releases/openvpn-2.7.8.tar.gz",
+    "sha256": "c070d1d2440b5a6fca6c2c68645c98cd492116ac36ef4f0946177115532c8e36"
+  },
+  "openvpn-android": {
+    "version": "0.7.68",
+    "filename": "ics-openvpn-0.7.68.tar.gz",
+    "url": "https://codeload.github.com/schwabe/ics-openvpn/tar.gz/refs/tags/v0.7.68",
+    "sha256": "ae0363c7b498b55ac09c1c885cdc2853f0789489b021657effe11ac257ca7ad3"
+  },
+  "hev": {
+    "version": "2.18.0",
+    "filename": "hev-socks5-tunnel-2.18.0.tar.gz",
+    "url": "https://codeload.github.com/heiher/hev-socks5-tunnel/tar.gz/refs/tags/2.18.0",
+    "sha256": "8a6364e3ffc4f3186c0a22b7ce0d03f0cf6464e562846913a3702eefae8c7991"
+  },
+  "hev-socks5-core": {
+    "version": "162dd996299fc2d2bff2dd63728f8a2cd71ed31a",
+    "filename": "hev-socks5-core-162dd996299fc2d2bff2dd63728f8a2cd71ed31a.tar.gz",
+    "url": "https://codeload.github.com/heiher/hev-socks5-core/tar.gz/162dd996299fc2d2bff2dd63728f8a2cd71ed31a",
+    "sha256": "257f7d9c6405d5073f7e8f6380b80f54e69cdcef8a72f8bbba869098b9d478ca",
+    "destination": "hev/src/core"
+  },
+  "hev-task-system": {
+    "version": "328f35d903221b51811b3d02b277d665dfbdc75f",
+    "filename": "hev-task-system-328f35d903221b51811b3d02b277d665dfbdc75f.tar.gz",
+    "url": "https://codeload.github.com/heiher/hev-task-system/tar.gz/328f35d903221b51811b3d02b277d665dfbdc75f",
+    "sha256": "f0a9d1d1be3476c01a3ceb6a31a4cb30de375b55fe1f5c230fa61f5148256abc",
+    "destination": "hev/third-part/hev-task-system"
+  },
+  "lwip": {
+    "version": "e22c9d2873cd5a8aade9deb2e518b75dab05170e",
+    "filename": "lwip-e22c9d2873cd5a8aade9deb2e518b75dab05170e.tar.gz",
+    "url": "https://codeload.github.com/heiher/lwip/tar.gz/e22c9d2873cd5a8aade9deb2e518b75dab05170e",
+    "sha256": "66314eac16f623598704413e5bb2fd9b8c2ce638607e4ebb14a7665f7887c627",
+    "destination": "hev/third-part/lwip"
+  },
+  "yaml": {
+    "version": "efa36117a8646d26d12b58e05bac472d7854a70d",
+    "filename": "yaml-efa36117a8646d26d12b58e05bac472d7854a70d.tar.gz",
+    "url": "https://codeload.github.com/heiher/yaml/tar.gz/efa36117a8646d26d12b58e05bac472d7854a70d",
+    "sha256": "01b5bd5d2e3851007f1e0f7361248eb14f2ae29f484fde0ff7651c3bedc9cda9",
+    "destination": "hev/third-part/yaml"
+  },
+  "lz4": {
+    "version": "1.10.0",
+    "filename": "lz4-1.10.0.tar.gz",
+    "url": "https://codeload.github.com/lz4/lz4/tar.gz/refs/tags/v1.10.0",
+    "sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b"
+  }
+}

@@ -77,6 +77,20 @@ keystore.properties
 .externalNativeBuild
 lib*.so
 *.apk
+*.aab
+*.jks
+*.keystore
+.tools/
+.idea/
+signing.properties
+.native/
+.kotlin/
+**/.cxx/
+**/build/
+__pycache__/
+*.aar
+/app/src/main/jniLibs/
+/app/src/main/assets/native-versions.json
 
 /app/src/main/assets/stunnel
 /.idea/caches

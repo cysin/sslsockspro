@@ -1,0 +1,14 @@
+{
+  "jdk": {
+    "version": "27+35",
+    "url": "https://github.com/adoptium/temurin27-binaries/releases/download/jdk-27%2B35/OpenJDK27U-jdk_x64_linux_hotspot_27_35.tar.gz",
+    "filename": "OpenJDK27U-jdk_x64_linux_hotspot_27_35.tar.gz",
+    "sha256": "1cf69a4848ffb728b3b260dfd45206a51566ab571a02a30092271d4c580bccbc"
+  },
+  "perl": {
+    "version": "5.42.0",
+    "url": "https://www.cpan.org/src/5.0/perl-5.42.0.tar.gz",
+    "filename": "perl-5.42.0.tar.gz",
+    "sha256": "e093ef184d7f9a1b9797e2465296f55510adb6dab8842b0c3ed53329663096dc"
+  }
+}
