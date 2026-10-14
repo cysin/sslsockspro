@@ -30,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Base64
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -169,13 +170,22 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
         }
     }
     if (appPicker) AlertDialog(onDismissRequest = { appPicker = false }, title = { Text("Choose VPN coverage") }, text = {
+        val selectedApps = profile.includedApps.toSet()
+        val choices = remember(apps, selectedApps) {
+            val knownPackages = apps.map { it.first }.toSet()
+            (apps + selectedApps.filterNot { it in knownPackages }.map { it to it })
+                .sortedWith(compareByDescending<Pair<String, String>> { it.first in selectedApps }
+                    .thenBy { it.second.lowercase(Locale.ROOT) }.thenBy { it.first })
+        }
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
             TextButton(onClick = { onChange(profile.copy(includedApps = emptyList())); appPicker = false }) { Text("Route all apps") }
-            (apps + profile.includedApps.filter { id -> apps.none { it.first == id } }.map { it to it }).forEach { (id, label) ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(id in profile.includedApps, { enabled -> onChange(profile.copy(includedApps =
-                        if (enabled) (profile.includedApps + id).distinct() else profile.includedApps - id)) })
-                    Column { Text(label); Text(id, style = MaterialTheme.typography.bodySmall) }
+            choices.forEach { (id, label) ->
+                key(id) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(id in selectedApps, { enabled -> onChange(profile.copy(includedApps =
+                            if (enabled) (profile.includedApps + id).distinct() else profile.includedApps - id)) })
+                        Column { Text(label); Text(id, style = MaterialTheme.typography.bodySmall) }
+                    }
                 }
             }
         }
