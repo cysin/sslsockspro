@@ -35,7 +35,9 @@ network or DNS fallback.
 5. Select the profile on **Status** and tap **Connect**. Notification
    permission and Android VPN consent are requested separately.
 6. Check status and **Logs**. Disconnect before editing an active profile or
-   restoring a backup.
+   restoring a backup. The button shows **Disconnecting…** until the native
+   worker releases its VPN descriptors. A shutdown timeout keeps traffic
+   blocked and asks you to retry; it does not report a completed disconnect.
 
 Basic settings change the selected tunnel while preserving comments, other
 tunnels, and repeated socket directives. The advanced editor shows the complete

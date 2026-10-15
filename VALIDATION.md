@@ -4,6 +4,39 @@ Recorded on 2026-10-14 against the delivered source and ARM64 build. Production
 credentials, phone identifiers, and private test logs remain outside Git and the
 source package.
 
+## Disconnect regression (2026-10-15)
+
+Reproduced on the connected Android 16 phone with the previously installed
+optimized APK: tapping the app's Disconnect button displayed Disconnected while
+Android still reported an active CONNECTED VPN network. Always-on and lockdown
+were disabled. The stale network persisted after native children exited.
+
+HEV borrows externally supplied TUN descriptors and does not close them. The
+worker now retains ownership instead of detaching an untracked duplicate, and
+closes its descriptor after HEV stops. The owner waits for worker cleanup before
+reporting Disconnected. A shutdown timeout retains the blocking owner TUN and
+reports an actionable error. The UI disables repeated clicks while stopping.
+
+Final-code checks passed: 21 JVM tests, release lint (the existing two warnings),
+debug/test APK builds, and the optimized minifiedDebug build. On the debug APK,
+three ordinary UI connect/disconnect cycles and startup cancellation removed the
+system VPN network. The opt-in saved-profile instrumentation regression also
+passed (one test covering three UI disconnects and startup cancellation).
+Its first run failed because the test read the accessibility window before it
+was available; the harness now waits for the Disconnect button.
+
+The optimized non-debuggable APK also passed three ordinary UI connection and
+disconnection cycles plus disconnect shortly after Connect. Every disconnect
+removed Android's CONNECTED VPN network. No native stunnel/OpenVPN children
+remained afterward. The optimized APK was left installed with the existing
+profiles, its checksum matched the tested build, and the test APK was removed.
+No global Private DNS, always-on, or lockdown setting was changed.
+
+The saved-profile regression is opt-in with instrumentation argument
+`savedProfileTest=true` and test class
+`io.github.cysin.sslsockspro.DeviceTunnelTest#savedProfileDisconnectReleasesSystemVpn`.
+It uses the selected saved proxy VPN profile and restores the profile snapshot.
+
 ## Results
 
 | Check | Result |

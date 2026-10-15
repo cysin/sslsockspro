@@ -60,6 +60,7 @@ class ConnectionService : VpnService() {
     @Volatile private var underlying: Network? = null
     private var reconnectJob: Job? = null
     private var startJob: Job? = null
+    private var stopJob: Job? = null
     private var gateways = "{}"
     private var retry = 0
     private var registered = false
@@ -150,6 +151,7 @@ class ConnectionService : VpnService() {
             if (isAlwaysOn) { state(ConnectionStage.ERROR, "Always-on VPN is controlled by Android VPN settings."); return START_STICKY }
             disconnect(); return START_NOT_STICKY
         }
+        if (stopJob?.isActive == true) return START_NOT_STICKY
         startForeground(1, notification("Preparing connection"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         if (!registered) {
             manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -354,17 +356,28 @@ class ConnectionService : VpnService() {
     }
 
     private fun disconnect() {
+        if (stopJob?.isActive == true) return
         intentionalStop = true
         startJob?.cancel(); reconnectJob?.cancel()
+        val stoppedSession = session
         state(ConnectionStage.STOPPING, "Stopping connection")
-        runCatching { engine?.stop(session) }
-        session = ""
-        if (bound) { runCatching { unbindService(connection) }; bound = false }
-        engine = null
-        synchronized(this) { tun?.close(); tun = null }
-        profile = null
-        TunnelState.status(ConnectionStatus())
-        stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+        stopJob = scope.launch {
+            val worker = engine
+            val stopped = withContext(Dispatchers.IO) {
+                worker == null || runCatching { worker.stopAndWait(stoppedSession) }.getOrDefault(false)
+            }
+            if (!stopped && engine != null) {
+                state(ConnectionStage.ERROR, "Native worker has not confirmed shutdown. Traffic remains blocked; retry Disconnect.")
+                return@launch
+            }
+            if (bound) { runCatching { unbindService(connection) }; bound = false }
+            engine = null
+            synchronized(this@ConnectionService) { tun?.close(); tun = null }
+            session = ""
+            profile = null
+            TunnelState.status(ConnectionStatus())
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+        }
     }
 
     private fun stopIfUnprotected() {

@@ -81,6 +81,16 @@ class EngineService : Service() {
                 scope.launch { if (active?.id == sessionId) { active?.close(); active = null } }
             }
         }
+        override fun stopAndWait(sessionId: String): Boolean {
+            check(Binder.getCallingUid() == Process.myUid())
+            stop(sessionId)
+            // The owner calls this on an IO thread and stays bound until all
+            // earlier cleanup has released the worker's TUN duplicates.
+            return runCatching {
+                executor.submit { }.get(10, TimeUnit.SECONDS)
+                true
+            }.getOrDefault(false)
+        }
         override fun versions(): String {
             check(Binder.getCallingUid() == Process.myUid())
             return assets.open("native-versions.json").bufferedReader().use { it.readText() }
@@ -189,9 +199,10 @@ class EngineService : Service() {
                           log-level: warn
                     """.trimIndent() + "\n")
                     hev = HevEngine()
-                    val nativeDescriptor = ParcelFileDescriptor.dup(tun!!.fileDescriptor).detachFd()
-                    if (!hev!!.TProxyStartService(config.absolutePath, nativeDescriptor)) {
-                        ParcelFileDescriptor.adoptFd(nativeDescriptor).close()
+                    // HEV borrows an externally supplied TUN descriptor; it
+                    // only closes interfaces it opens itself. Keep ownership
+                    // here and close it after the packet engine has stopped.
+                    if (!hev!!.TProxyStartService(config.absolutePath, tun!!.fd)) {
                         error("Could not start the VPN packet engine")
                     }
                     callback.status("CONNECTED", "VPN connected: TCP and DNS tunneled; other UDP blocked", id)

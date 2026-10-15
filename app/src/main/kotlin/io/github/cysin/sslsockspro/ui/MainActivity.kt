@@ -248,9 +248,9 @@ private fun TunnelApp() {
                                 scope.launch { withContext(Dispatchers.IO) { store.settings(backup.settings.copy(selectedProfileId = id)) }; refresh() }
                             }
                         } else Text("Import a client package with its certificates to get started.")
-                        Button(onClick = { if (active) ConnectionService.stop(context) else selected?.let(::connect) }, enabled = !status.alwaysOn && (active || selected != null),
+                        Button(onClick = { if (active) ConnectionService.stop(context) else selected?.let(::connect) }, enabled = !status.alwaysOn && status.stage != ConnectionStage.STOPPING && (active || selected != null),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
-                            Text(if (status.alwaysOn) "Controlled by Android always-on VPN" else if (active) "Disconnect" else "Connect")
+                            Text(if (status.alwaysOn) "Controlled by Android always-on VPN" else if (status.stage == ConnectionStage.STOPPING) "Disconnecting…" else if (active) "Disconnect" else "Connect")
                         }
                         if (selected == null) OutlinedButton(onClick = { importFiles.launch("*/*") }, modifier = Modifier.fillMaxWidth()) { Text("Import client package") }
                     } }

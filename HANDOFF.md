@@ -53,8 +53,9 @@ explicit native path. AIDL lives under `app/src/main/aidl`.
 - Keep native start/stop and cleanup serialized across service instances.
   Binder/UI threads must not wait for native startup, health probes, child exits,
   or joins. Cancellation must interrupt pending startup and cancel DoH calls.
-- Pass duplicated TUN descriptors; the owner retains the original. HEV owns and
-  closes its detached duplicate. Close all received SCM_RIGHTS descriptors.
+- Pass duplicated TUN descriptors; the owner retains the original. HEV
+  borrows the worker descriptor; the worker closes it after HEV stops. Never
+  detach a duplicate into HEV. Close all received SCM_RIGHTS descriptors.
 - OpenVPN connection blocks inherit proxy defaults at parse time. Insert proxy
   options before blocks and force TCP for stunnel-carried OpenVPN. Do not add
   `ifconfig-noexec`: Android's IFCONFIG management events must populate the TUN.

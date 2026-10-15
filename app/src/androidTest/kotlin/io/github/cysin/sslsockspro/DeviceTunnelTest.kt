@@ -2,6 +2,8 @@ package io.github.cysin.sslsockspro
 
 import android.app.ActivityManager
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Process
 import android.view.accessibility.AccessibilityNodeInfo
@@ -67,10 +69,54 @@ class DeviceTunnelTest {
         Thread.sleep(500)
         instrumentation.runOnMainSync { ConnectionService.start(context, profile) }
     }
-    private fun stop() {
-        instrumentation.runOnMainSync { ConnectionService.stop(context) }
+    private fun stop(fromUi: Boolean = false) {
+        if (fromUi) {
+            instrumentation.waitForIdleSync()
+            val automation = instrumentation.uiAutomation
+            fun clickDisconnect(node: AccessibilityNodeInfo): Boolean {
+                if (node.text?.toString() == "Disconnect") {
+                    var target: AccessibilityNodeInfo? = node
+                    while (target != null && !target.isClickable) target = target.parent
+                    return target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+                }
+                return (0 until node.childCount).any { index ->
+                    node.getChild(index)?.let(::clickDisconnect) == true
+                }
+            }
+            await(10000) {
+                automation.rootInActiveWindow?.let(::clickDisconnect) == true
+            }
+        } else instrumentation.runOnMainSync { ConnectionService.stop(context) }
         await(10000) { !TunnelState.status.value.running && !TunnelState.status.value.vpnActive }
-        Thread.sleep(300)
+        val manager = context.getSystemService(ConnectivityManager::class.java)
+        await(10000) {
+            manager.allNetworks.none {
+                manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+            }
+        }
+    }
+
+    @Test fun savedProfileDisconnectReleasesSystemVpn() {
+        assumeTrue("Opt in to using the phone's saved profile",
+            InstrumentationRegistry.getArguments().getString("savedProfileTest") == "true")
+        val original = store.read()
+        val selected = original.profiles.firstOrNull {
+            it.id == original.settings.selectedProfileId && it.mode == ConnectionMode.PROXY_VPN
+        }
+        assumeTrue("Select a working proxy VPN profile on the phone", selected != null)
+        try {
+            repeat(3) {
+                start(selected!!)
+                await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+                stop(fromUi = true)
+            }
+            start(selected!!)
+            await(10000) { TunnelState.status.value.vpnActive }
+            stop(fromUi = true)
+        } finally {
+            if (TunnelState.status.value.running) runCatching { stop() }
+            store.write(original)
+        }
     }
 
     @Test fun realStunnelProxyVpnDnsAndWorkerFailure() {
@@ -146,7 +192,7 @@ class DeviceTunnelTest {
             }
             start(profile.copy(mode = ConnectionMode.PROXY_VPN))
             await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
-            stop()
+            stop(fromUi = true)
             completed = true
         } finally {
             if (TunnelState.status.value.running) runCatching { stop() }
