@@ -57,6 +57,7 @@ class ConnectionService : VpnService() {
     @Volatile private var tun: ParcelFileDescriptor? = null
     private var bound = false
     @Volatile private var intentionalStop = false
+    @Volatile private var permissionRevoked = false
     @Volatile private var underlying: Network? = null
     private var reconnectJob: Job? = null
     private var startJob: Job? = null
@@ -390,7 +391,13 @@ class ConnectionService : VpnService() {
         stopSelf()
     }
 
-    override fun onRevoke() { scope.launch { disconnect() }; super.onRevoke() }
+    override fun onRevoke() {
+        // Android has already deactivated this VPN. Its default implementation
+        // stops the service; an async disconnect would be cancelled by teardown.
+        permissionRevoked = true
+        intentionalStop = true
+        super.onRevoke()
+    }
     override fun onDestroy() {
         intentionalStop = true
         runCatching { engine?.stop(session) }
@@ -398,7 +405,11 @@ class ConnectionService : VpnService() {
         runCatching { tun?.close() }
         if (registered) runCatching { manager.unregisterNetworkCallback(networkCallback) }
         val old = TunnelState.status.value
-        TunnelState.status(old.copy(running = false, vpnActive = false, alwaysOn = false))
+        // A destroyed owner cannot still be connecting/stopping. Keep an
+        // actionable validation error unless the user explicitly revoked VPN.
+        TunnelState.status(if (old.stage == ConnectionStage.ERROR && !permissionRevoked)
+            old.copy(running = false, vpnActive = false, alwaysOn = false)
+            else ConnectionStatus())
         scope.cancel(); super.onDestroy()
     }
 

@@ -42,6 +42,9 @@ explicit native path. AIDL lives under `app/src/main/aidl`.
 
 ## Invariants
 
+- System VPN revocation must stop the owner without relying on a coroutine
+  that service destruction can cancel. Teardown resets transient connection
+  stages to IDLE; ordinary configuration errors remain visible until retry.
 - The VPN owner must retain its TUN during worker/native failure. Only explicit
   disconnect, permission revocation, Android service destruction, or mode changes
   close it. Whole-process death needs Android's system lockdown.

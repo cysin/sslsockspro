@@ -1,8 +1,60 @@
 # Validation record
 
-Recorded on 2026-10-14 against the delivered source and ARM64 build. Production
+Baseline recorded on 2026-10-14, with disconnect regressions checked on
+2026-10-15 against the updated source and ARM64 build. Production
 credentials, phone identifiers, and private test logs remain outside Git and the
 source package.
+
+## System VPN dialog disconnect (2026-10-15)
+
+Reproduced on the Android 16 phone with the previously installed optimized APK:
+disconnecting from the actual system VPN dialog (including its byte counters)
+removed Android's VPN network while the app stayed at Disconnecting.
+Always-on and lockdown were disabled.
+
+The system VPN Disconnect path revokes permission and stops the owner service.
+Previously, onRevoke launched an asynchronous disconnect and then called the
+framework stopSelf implementation. Service destruction could cancel the pending
+worker acknowledgement, leaving STOPPING in the shared UI state even though the
+running/VPN flags were false.
+
+Revocation now marks the stop as intentional and uses framework teardown without
+starting a cancellable disconnect task. Destruction resets transient states to
+IDLE; an explicit revocation also clears stale errors. Ordinary errors remain
+visible after unprotected validation failure. Selected profiles are unchanged.
+
+Existing device disconnect assertions now require IDLE and an enabled Connect
+button in addition to cleared running/VPN flags and removal of the system VPN
+network. System-dialog checks use ordinary UI taps outside instrumentation:
+calling onRevoke alone does not release Android's binding, and the in-process
+accessibility harness could not reliably activate this phone's OEM dialog.
+
+The new JVM lifecycle regression fails against the previous implementation
+because STOPPING survives destruction. The corrected implementation passes all
+24 JVM tests, including teardown, permission revocation, and preservation of
+configuration errors. Release lint passed with no errors and the two existing
+warnings. Debug, instrumentation, optimized, and signed release APK builds
+succeeded.
+
+The corrected debug APK returned to Disconnected with Connect available after
+a real system-dialog disconnect. The opt-in saved-profile device regression
+also passed three app-button disconnects and cancellation during startup.
+
+The seven baseline phone tests were rerun against the corrected debug build.
+Native engines, encrypted storage, the disposable OpenVPN fixture, and UI
+rotation passed. The initial stunnel attempt received a connection reset using
+the client package's obsolete server address. Rerunning with the address from
+the phone's working saved profile passed local proxy operation, tunneled DNS,
+all-app VPN DNS/HTTPS, worker-death blocking, recovery, and disconnect. The test
+profile snapshot was restored; no production server configuration was changed.
+
+The optimized non-debuggable APK passed three ordinary UI connect/system-dialog
+disconnect cycles on the same phone. Each removed Android's CONNECTED VPN
+network and returned to Disconnected with an enabled Connect button. A further
+reconnect and app-button disconnect passed, and no native stunnel/OpenVPN
+children remained. The optimized build was left installed with the original
+profiles. Its installed APK checksum matched the tested build; the test APK was
+removed. No global Private DNS, always-on, or lockdown setting was changed.
 
 ## Disconnect regression (2026-10-15)
 
@@ -41,8 +93,8 @@ It uses the selected saved proxy VPN profile and restores the profile snapshot.
 
 | Check | Result |
 | --- | --- |
-| JVM tests | 21 passed; no failures or errors |
-| Debug phone instrumentation | 7 passed; no failures or skips |
+| JVM tests | 24 passed; no failures or errors |
+| Debug phone instrumentation | 7 baseline tests passed across the runs described above; opt-in saved-profile disconnect regression also passed |
 | Signed release and optimized test APK builds | Successful |
 | Release lint | 0 errors, 2 warnings described below |
 | Release signature | Verified with Android apksigner |

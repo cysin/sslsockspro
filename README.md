@@ -38,6 +38,8 @@ network or DNS fallback.
    restoring a backup. The button shows **Disconnecting…** until the native
    worker releases its VPN descriptors. A shutdown timeout keeps traffic
    blocked and asks you to retry; it does not report a completed disconnect.
+   Disconnecting from Android's VPN status dialog returns the app to
+   **Disconnected** with **Connect** available.
 
 Basic settings change the selected tunnel while preserving comments, other
 tunnels, and repeated socket directives. The advanced editor shows the complete

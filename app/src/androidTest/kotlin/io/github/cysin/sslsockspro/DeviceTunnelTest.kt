@@ -67,33 +67,50 @@ class DeviceTunnelTest {
         if (activity == null) activity = instrumentation.startActivitySync(Intent(context, io.github.cysin.sslsockspro.ui.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         instrumentation.runOnMainSync { activity!!.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
         Thread.sleep(500)
+        if (profile.mode != ConnectionMode.LOCAL_PROXY) permission()
         instrumentation.runOnMainSync { ConnectionService.start(context, profile) }
     }
-    private fun stop(fromUi: Boolean = false) {
-        if (fromUi) {
-            instrumentation.waitForIdleSync()
-            val automation = instrumentation.uiAutomation
-            fun clickDisconnect(node: AccessibilityNodeInfo): Boolean {
-                if (node.text?.toString() == "Disconnect") {
-                    var target: AccessibilityNodeInfo? = node
-                    while (target != null && !target.isClickable) target = target.parent
-                    return target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
-                }
-                return (0 until node.childCount).any { index ->
-                    node.getChild(index)?.let(::clickDisconnect) == true
-                }
+    private fun textNode(label: String): AccessibilityNodeInfo? {
+        fun find(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (node.text?.toString() == label) return node
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { find(it)?.let { match -> return match } }
             }
-            await(10000) {
-                automation.rootInActiveWindow?.let(::clickDisconnect) == true
+            return null
+        }
+        return instrumentation.uiAutomation.rootInActiveWindow?.let(::find)
+    }
+
+    private fun button(label: String): AccessibilityNodeInfo? {
+        var target = textNode(label)
+        while (target != null && !target.isClickable) target = target.parent
+        return target
+    }
+
+    private fun awaitDisconnected() {
+        await(15000) {
+            TunnelState.status.value.let {
+                it.stage == ConnectionStage.IDLE && !it.running && !it.vpnActive
             }
-        } else instrumentation.runOnMainSync { ConnectionService.stop(context) }
-        await(10000) { !TunnelState.status.value.running && !TunnelState.status.value.vpnActive }
+        }
         val manager = context.getSystemService(ConnectivityManager::class.java)
         await(10000) {
             manager.allNetworks.none {
                 manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
             }
         }
+        await(10000) { button("Connect")?.isEnabled == true }
+    }
+
+    private fun stop(fromUi: Boolean = false) {
+        if (fromUi) {
+            instrumentation.waitForIdleSync()
+            await(10000) {
+                button("Disconnect")?.takeIf { it.isEnabled }
+                    ?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+            }
+        } else instrumentation.runOnMainSync { ConnectionService.stop(context) }
+        awaitDisconnected()
     }
 
     @Test fun savedProfileDisconnectReleasesSystemVpn() {
