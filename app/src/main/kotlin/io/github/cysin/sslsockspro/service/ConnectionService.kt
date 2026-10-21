@@ -111,6 +111,22 @@ class ConnectionService : VpnService(), TunnelPlatform {
 
     private fun networkChanged() { scope.launch { controller.networkChanged() } }
 
+    override fun onCreate() {
+        super.onCreate()
+        // Traffic counters cost wakeups; the worker reports them only while
+        // the app is on screen.
+        scope.launch {
+            TunnelState.uiVisible.collect {
+                val worker = engine ?: return@collect
+                val session = controller.session.takeIf { it.isNotEmpty() } ?: return@collect
+                val interval = statsInterval()
+                launch(Dispatchers.IO) { runCatching { worker.setStatsInterval(session, interval) } }
+            }
+        }
+    }
+
+    private fun statsInterval(): Long = if (TunnelState.uiVisible.value) 1000L else 0L
+
     override fun onBind(intent: Intent): IBinder? = if (intent.action == SERVICE_INTERFACE) super.onBind(intent) else localBinder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -192,7 +208,10 @@ class ConnectionService : VpnService(), TunnelPlatform {
             }
     }
 
-    override fun establishBlocking(profile: TunnelProfile) = establish(JSONObject())
+    // Proxy VPN packets never leave the phone as-is, so the TUN MTU can be
+    // large; it must equal the packet engine's MTU.
+    override fun establishBlocking(profile: TunnelProfile) =
+        establish(if (profile.mode == ConnectionMode.PROXY_VPN) JSONObject().put("mtu", EngineService.PROXY_MTU) else JSONObject())
     override fun closeTun() { synchronized(this) { tun?.close(); tun = null } }
 
     @Synchronized private fun establish(configuration: JSONObject) {
@@ -241,7 +260,10 @@ class ConnectionService : VpnService(), TunnelPlatform {
         val worker = engine ?: return
         val encoded = gateways.encode()
         scope.launch(Dispatchers.IO) {
-            try { if (controller.accepts(session)) worker.start(profile.id, session, encoded, callback) }
+            try {
+                if (controller.accepts(session)) worker.start(profile.id, session, encoded, callback)
+                worker.setStatsInterval(session, statsInterval())
+            }
             catch (_: Exception) { scope.launch(Dispatchers.Main) { controller.engineUnreachable(session) } }
         }
     }

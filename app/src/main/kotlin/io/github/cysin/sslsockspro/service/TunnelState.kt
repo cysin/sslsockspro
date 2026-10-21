@@ -13,6 +13,10 @@ object TunnelState {
     /** [status] without traffic counters; it changes only with the connection
      * itself, so screens that ignore counters are not recomposed by them. */
     val activity = activityMutable.asStateFlow()
+    private val uiVisibleMutable = MutableStateFlow(false)
+    /** Whether an app screen is in the foreground. */
+    val uiVisible = uiVisibleMutable.asStateFlow()
+    fun uiVisible(value: Boolean) { uiVisibleMutable.value = value }
     private val logsMutable = MutableStateFlow<List<String>>(emptyList())
     val logs = logsMutable.asStateFlow()
     @Synchronized fun status(value: ConnectionStatus) {

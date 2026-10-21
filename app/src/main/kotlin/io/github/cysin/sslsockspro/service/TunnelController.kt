@@ -22,6 +22,8 @@ import java.util.UUID
  * mode closes it. Configuration and authentication errors stop retrying and
  * the first actionable error stays visible. */
 class TunnelController(private val platform: TunnelPlatform, private val scope: CoroutineScope) {
+    companion object { const val NETWORK_SETTLE_MILLIS = 2000L }
+
     @Volatile var profile: TunnelProfile? = null
         private set
     @Volatile var session = ""
@@ -36,6 +38,7 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
     private var startJob: Job? = null
     private var reconnectJob: Job? = null
     private var stopJob: Job? = null
+    private var networkJob: Job? = null
 
     val stopping: Boolean get() = stopJob?.isActive == true
 
@@ -171,14 +174,46 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
         if (sessionId == session) platform.status = platform.status.copy(bytesReceived = received, bytesSent = sent)
     }
 
+    /** Network callbacks arrive in bursts; act once they settle. */
     fun networkChanged() {
+        networkJob?.cancel()
+        networkJob = scope.launch { delay(NETWORK_SETTLE_MILLIS); evaluateNetwork() }
+    }
+
+    /** A working tunnel survives a network change: new gateway sockets bind
+     * to the new network and the worker re-checks the tunnel, escalating to
+     * a full reconnect only if that check fails. */
+    private fun evaluateNetwork() {
         val replacement = platform.physicalNetwork()
         if (profile == null || intentionalStop) return
         val previous = network
         if (replacement?.key == previous?.key && replacement?.signature == previous?.signature) return
         network = replacement
         platform.bindSocketsTo(replacement)
-        failed(if (replacement == null) "Network unavailable; protected traffic remains blocked." else "Network changed; rebuilding the encrypted connection.")
+        val established = platform.status.stage == ConnectionStage.CONNECTED || platform.status.stage == ConnectionStage.LISTENING
+        when {
+            replacement == null -> failed("Network unavailable; protected traffic remains blocked.")
+            replacement.captivePortal -> failed("This hotspot needs sign-in. Open Wi-Fi settings, sign in, and reconnect.", retryAllowed = false)
+            profile?.mode == ConnectionMode.PROXY_VPN && replacement.strictPrivateDns -> failed(
+                "Android Private DNS is set to a strict provider. Choose Automatic or Off in Android Private DNS settings to use the VPN's encrypted DNS. No DNS was sent directly.",
+                retryAllowed = false)
+            previous == null || !established -> reconnectNow("Network available; reconnecting.")
+            else -> {
+                if (replacement.key != previous.key) platform.advertise(replacement)
+                platform.engineNetworkChanged(session, sameNetwork = replacement.key == previous.key)
+                platform.log("Network changed; keeping the tunnel and checking it")
+            }
+        }
+    }
+
+    /** The network is usable again: do not wait out the backoff delay. */
+    private fun reconnectNow(message: String) {
+        if (permanentFailure || !reconnectEnabled) { failed(message); return }
+        reconnectJob?.cancel()
+        retry = 0
+        state(ConnectionStage.RECONNECTING, message)
+        val id = profile?.id ?: return
+        reconnectJob = scope.launch { reconnectJob = null; connect(id) }
     }
 
     private fun failed(message: String, retryAllowed: Boolean = true) {
@@ -240,6 +275,7 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
 
     fun destroyed() {
         intentionalStop = true
+        networkJob?.cancel()
         platform.stopEngine(session)
         platform.unbindEngine()
         platform.closeTun()

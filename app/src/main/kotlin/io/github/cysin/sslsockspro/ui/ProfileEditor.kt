@@ -21,6 +21,7 @@ import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.Gateways
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.model.ConnectionMode
+import io.github.cysin.sslsockspro.model.DnsMode
 import io.github.cysin.sslsockspro.model.ProxyKind
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import kotlinx.coroutines.Dispatchers
@@ -92,9 +93,15 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                         if (profile.mode != ConnectionMode.LOCAL_PROXY) Box {
                             OutlinedButton(onClick = { proxyMenu = true }) { Text(if (profile.proxyKind == ProxyKind.HTTP_CONNECT) "HTTP CONNECT backend" else "SOCKS5 backend") }
                             DropdownMenu(proxyMenu, { proxyMenu = false }) { ProxyKind.entries.forEach { kind ->
-                                DropdownMenuItem(text = { Text(if (kind == ProxyKind.HTTP_CONNECT) "HTTP CONNECT (usual server port 9983)" else "SOCKS5 (usual server port 9984)") },
+                                DropdownMenuItem(text = { Text(if (kind == ProxyKind.HTTP_CONNECT) "HTTP CONNECT" else "SOCKS5") },
                                     onClick = { onChange(profile.copy(proxyKind = kind)); proxyMenu = false })
                             } }
+                        }
+                        if (profile.mode != ConnectionMode.LOCAL_PROXY) {
+                            Text("The app checks the backend type when connecting and uses what the server answers.", style = MaterialTheme.typography.bodySmall)
+                            SecureTextField(profile.proxyUsername, { onChange(profile.copy(proxyUsername = it)) }, "Backend proxy username, if required", Modifier.fillMaxWidth())
+                            if (profile.proxyUsername.isNotEmpty()) SecureTextField(profile.proxyPassword, { onChange(profile.copy(proxyPassword = it)) },
+                                "Backend proxy password", Modifier.fillMaxWidth(), secret = true)
                         }
                         if (document?.sections.orEmpty().size > 1) Box {
                             OutlinedButton(onClick = { sectionMenu = true }) { Text("Selected tunnel: $section") }
@@ -143,6 +150,14 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                         OutlinedButton(onClick = { appPicker = true }) { Text("Select apps") }
                     }
                     if (profile.mode == ConnectionMode.PROXY_VPN) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(profile.dnsMode == DnsMode.PROXY, { onChange(profile.copy(dnsMode = if (it) DnsMode.PROXY else DnsMode.DOH)) })
+                            Text("Resolve names at the proxy server")
+                        }
+                        Text(if (profile.dnsMode == DnsMode.PROXY) "Apps receive placeholder addresses and your proxy looks names up, so no DNS-over-HTTPS provider sees them. " +
+                            "Other record types, such as mail or service records, still use DNS-over-HTTPS through the tunnel."
+                            else "Apps' lookups use DNS-over-HTTPS through the tunnel; the provider below sees the names and your proxy's address.",
+                            style = MaterialTheme.typography.bodySmall)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(profile.proxyIpv6, { onChange(profile.copy(proxyIpv6 = it)) }); Text("Enable IPv6 destinations")
                         }

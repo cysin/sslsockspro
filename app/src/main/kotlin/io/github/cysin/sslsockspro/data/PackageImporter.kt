@@ -132,7 +132,8 @@ object PackageImporter {
             val hint = hints[name]
             val section = hint?.section?.also { require(it in document.sections) { "The manifest names an unknown tunnel section: $it" } }
                 ?: document.sections.first()
-            val kind = hint?.proxyKind ?: if (document.remotes(section).first().port == 9984) ProxyKind.SOCKS5 else ProxyKind.HTTP_CONNECT
+            // Without a manifest the backend is identified when connecting.
+            val kind = hint?.proxyKind ?: ProxyKind.HTTP_CONNECT
             val openVpn = vpn.values.firstOrNull()?.toString(Charsets.UTF_8).orEmpty()
             val mode = hint?.mode ?: ConnectionMode.PROXY_VPN
             require(mode != ConnectionMode.OPENVPN || openVpn.isNotBlank()) { "The manifest selects OpenVPN, but the package has no .ovpn profile" }

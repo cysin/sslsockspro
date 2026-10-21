@@ -168,6 +168,9 @@ class StunnelDocument private constructor(val lines: List<ConfigLine>) {
             socket = r:TCP_NODELAY=1
             socket = l:SO_KEEPALIVE=1
             socket = r:SO_KEEPALIVE=1
+            socket = r:TCP_KEEPIDLE=300
+            socket = r:TCP_KEEPINTVL=30
+            socket = r:TCP_KEEPCNT=4
 
             [proxy]
             accept = 127.0.0.1:33009

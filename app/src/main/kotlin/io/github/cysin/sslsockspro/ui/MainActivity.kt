@@ -5,6 +5,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import io.github.cysin.sslsockspro.service.TunnelState
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -17,4 +18,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent { TunnelApp() }
     }
+
+    override fun onStart() { super.onStart(); TunnelState.uiVisible(true) }
+    override fun onStop() { TunnelState.uiVisible(false); super.onStop() }
 }

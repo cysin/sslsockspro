@@ -2,6 +2,9 @@ package io.github.cysin.sslsockspro.network
 
 import io.github.cysin.sslsockspro.config.Endpoint
 import io.github.cysin.sslsockspro.model.ProxyKind
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -9,6 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.xbill.DNS.EDNSOption
 import org.xbill.DNS.ExtendedFlags
 import org.xbill.DNS.Flags
@@ -18,6 +22,7 @@ import org.xbill.DNS.OPTRecord
 import org.xbill.DNS.Opcode
 import org.xbill.DNS.Rcode
 import org.xbill.DNS.Section
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -60,19 +65,39 @@ class TunneledDns(
         // Apps give up on DNS within seconds. A pooled tunnel connection can be
         // stale after idling; retrying the idempotent query avoids SERVFAIL.
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).callTimeout(8, TimeUnit.SECONDS)
+        // Queries share HTTP/2 connections; concurrency is bounded here and
+        // by the relay, not by a fixed pool of blocked threads.
+        .dispatcher(Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 64 })
         .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(true).build()
 
+    private fun request(query: Message) = Request.Builder().url(url).header("Accept", "application/dns-message")
+        .post(query.toWire().toRequestBody("application/dns-message".toMediaType())).build()
+
+    private fun answer(reply: Response, incoming: Message): ByteArray {
+        require(reply.isSuccessful && reply.header("Content-Type").orEmpty().substringBefore(';').equals("application/dns-message", true)) { "Encrypted DNS service rejected the request" }
+        val bytes = reply.body.byteStream().use { io.github.cysin.sslsockspro.data.PackageImporter.boundedRead(it, 65535) }
+        require(bytes.isNotEmpty()) { "Encrypted DNS returned an empty response" }
+        return finish(Message(bytes), incoming, suppressBindings)
+    }
+
+    /** Blocking lookup, used for health probes. */
     fun resolve(packet: ByteArray): ByteArray {
         val incoming = Message(packet)
         val query = prepare(incoming, suppressBindings) ?: return response(incoming, Rcode.NOERROR).toWire()
-        val request = Request.Builder().url(url).header("Accept", "application/dns-message")
-            .post(query.toWire().toRequestBody("application/dns-message".toMediaType())).build()
-        client.newCall(request).execute().use { reply ->
-            require(reply.isSuccessful && reply.header("Content-Type").orEmpty().substringBefore(';').equals("application/dns-message", true)) { "Encrypted DNS service rejected the request" }
-            val bytes = reply.body?.byteStream()?.use { io.github.cysin.sslsockspro.data.PackageImporter.boundedRead(it, 65535) }
-                ?: throw IllegalArgumentException("Encrypted DNS returned an empty response")
-            return finish(Message(bytes), incoming, suppressBindings)
-        }
+        client.newCall(request(query)).execute().use { reply -> return answer(reply, incoming) }
+    }
+
+    /** Asynchronous lookup for apps; failures are answered with SERVFAIL. */
+    fun resolveAsync(packet: ByteArray, reply: (ByteArray) -> Unit) {
+        val incoming = try { Message(packet) } catch (_: Exception) { reply(failure(packet)); return }
+        val query = try { prepare(incoming, suppressBindings) } catch (_: Exception) { reply(failure(packet)); return }
+        if (query == null) { reply(response(incoming, Rcode.NOERROR).toWire()); return }
+        client.newCall(request(query)).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = reply(failure(packet))
+            override fun onResponse(call: Call, response: Response) {
+                reply(response.use { runCatching { answer(it, incoming) }.getOrElse { failure(packet) } })
+            }
+        })
     }
 
     override fun close() {

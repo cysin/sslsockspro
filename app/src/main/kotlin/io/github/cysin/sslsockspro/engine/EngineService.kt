@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.Process
 import io.github.cysin.sslsockspro.TunnelApplication
 import io.github.cysin.sslsockspro.config.Endpoint
@@ -13,8 +14,13 @@ import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.model.ConnectionMode
+import io.github.cysin.sslsockspro.model.DnsMode
 import io.github.cysin.sslsockspro.model.ProxyKind
 import io.github.cysin.sslsockspro.model.TunnelProfile
+import io.github.cysin.sslsockspro.network.BackendProbe
+import io.github.cysin.sslsockspro.network.DnsCache
+import io.github.cysin.sslsockspro.network.DnsService
+import io.github.cysin.sslsockspro.network.FakeDns
 import io.github.cysin.sslsockspro.network.SocksRelay
 import io.github.cysin.sslsockspro.network.TunneledDns
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +51,7 @@ class EngineService : Service() {
     @Volatile private var active: Runtime? = null
     private val control = Any()
     @Volatile private var requestedSession: String? = null
+    @Volatile private var statsInterval = 1000L
     private val binder = object : IEngineService.Stub() {
         override fun start(profileId: String, sessionId: String, resolvedGateways: String, callback: IEngineCallback) {
             check(Binder.getCallingUid() == Process.myUid())
@@ -85,6 +92,8 @@ class EngineService : Service() {
         override fun stopAndWait(sessionId: String): Boolean {
             check(Binder.getCallingUid() == Process.myUid())
             stop(sessionId)
+            // An explicit disconnect forgets cached and synthetic DNS answers.
+            dnsStates.clear()
             // The owner calls this on an IO thread and stays bound until all
             // earlier cleanup has released the worker's TUN duplicates.
             return runCatching {
@@ -98,7 +107,9 @@ class EngineService : Service() {
         }
         override fun setStatsInterval(sessionId: String, milliseconds: Long) {
             check(Binder.getCallingUid() == Process.myUid())
-            active?.takeIf { it.id == sessionId }?.statsIntervalMs = milliseconds.coerceIn(0, 60_000)
+            // May arrive before the session's runtime exists; it starts from this value.
+            statsInterval = milliseconds.coerceIn(0, 60_000)
+            active?.takeIf { it.id == sessionId }?.statsIntervalMs = statsInterval
         }
         override fun versions(): String {
             check(Binder.getCallingUid() == Process.myUid())
@@ -136,8 +147,9 @@ class EngineService : Service() {
         private var tun: ParcelFileDescriptor? = null
         private var relay: SocksRelay? = null
         @Volatile private var dns: TunneledDns? = null
+        @Volatile private var resolver: DnsService? = null
         @Volatile private var running = true
-        @Volatile var statsIntervalMs = 1000L
+        @Volatile var statsIntervalMs = statsInterval
             set(value) { field = value; applyOpenVpnStats() }
         private var nextStats = 0L
         private var lastTraffic = -1L to -1L
@@ -201,17 +213,26 @@ class EngineService : Service() {
                     callback.event(EngineEvent.LISTENING, "", id)
                 }
                 ConnectionMode.PROXY_VPN -> {
-                    relay = SocksRelay(upstream!!, profile.proxyKind, ownerCheck) { query -> dns!!.resolve(query) }
+                    val state = dnsStates.compute(profile.id) { _, existing ->
+                        existing?.takeIf { it.mode == profile.dnsMode } ?: DnsState(profile.dnsMode, DnsCache(),
+                            if (profile.dnsMode == DnsMode.PROXY) FakeDns() else null)
+                    }!!
+                    relay = SocksRelay(upstream!!, backend(profile, upstream), ownerCheck, profile.backendCredentials(),
+                        target = state.synthetic?.let { names -> names::target } ?: { it },
+                        keepWarm = { power.isInteractive }) { query, reply -> resolver!!.resolve(query, reply) }
                     val relayEndpoint = Endpoint("127.0.0.1", relay!!.port)
                     dns = TunneledDns(profile.dnsEndpoint, relayEndpoint, ProxyKind.HTTP_CONNECT, profile.suppressServiceBindings,
                         relay!!.username to relay!!.password)
+                    resolver = DnsService(dns!!::resolveAsync, state.cache, state.synthetic, profile.proxyIpv6)
                     probe(dns!!)
                     checkRunning()
                     tun = callback.acquireTun("{}", id) ?: error("VPN interface is unavailable")
                     val config = File(directory, "hev.yml")
+                    // The TUN is virtual: a large MTU means fewer packets for
+                    // the same data. It must match the owner's TUN MTU.
                     config.writeText("""
                         tunnel:
-                          mtu: 1500
+                          mtu: $PROXY_MTU
                           ipv4: 198.18.0.1
                           ipv6: 'fd00:5353::1'
                           icmp: 'off'
@@ -221,10 +242,11 @@ class EngineService : Service() {
                           username: '${relay!!.username}'
                           password: '${relay!!.password}'
                           udp: 'udp'
+                          pipeline: true
                         misc:
-                          max-session-count: 128
+                          max-session-count: 1024
                           connect-timeout: 15000
-                          tcp-read-write-timeout: 43200000
+                          tcp-read-write-timeout: 1800000
                           log-level: warn
                     """.trimIndent() + "\n")
                     hev = HevEngine()
@@ -241,7 +263,9 @@ class EngineService : Service() {
                     managementPath = managementSocket
                     managementSocket.delete()
                     val proxy = if (profile.openVpnViaStunnel) {
-                        relay = SocksRelay(upstream!!, profile.proxyKind, ownerCheck) { error("OpenVPN resolves DNS inside its tunnel") }
+                        relay = SocksRelay(upstream!!, backend(profile, upstream), ownerCheck, profile.backendCredentials()) { _, _ ->
+                            error("OpenVPN resolves DNS inside its tunnel")
+                        }
                         val authentication = File(directory, "relay-auth")
                         authentication.writeText(relay!!.username + "\n" + relay!!.password + "\n")
                         authentication.setReadable(false, false); authentication.setReadable(true, true)
@@ -258,11 +282,17 @@ class EngineService : Service() {
                 }
             }
             checkRunning()
+            // Child exits arrive as events; the loop only polls what has no event.
+            for (child in listOfNotNull(stunnel, openvpn)) Thread({
+                runCatching { child.waitFor() }
+                if (running) runCatching { callback.event(EngineEvent.ENGINE_STOPPED, "", id) }
+            }, "native-exit-watch").apply { isDaemon = true; start() }
             watchdog = scope.launch(Dispatchers.IO) {
                 while (running) {
-                    delay(1000)
+                    // Fast while counters are displayed; otherwise rare wakeups.
+                    delay(if (statsIntervalMs > 0) 1000 else 5000)
                     if (!running) break
-                    if (stunnel?.isAlive == false || openvpn?.isAlive == false || (hev != null && !hev!!.TProxyIsRunning())) {
+                    if (hev != null && !hev!!.TProxyIsRunning()) {
                         runCatching { callback.event(EngineEvent.ENGINE_STOPPED, "", id) }
                         break
                     }
@@ -287,12 +317,15 @@ class EngineService : Service() {
                         log(relay!!.diagnostics())
                     }
                     if (profile.mode == ConnectionMode.PROXY_VPN && System.nanoTime() >= nextHealthCheck) {
-                        // One slow or failed DoH answer must not tear down every
-                        // app connection; three consecutive failures do.
+                        // Each probe wakes the radio, so probe rarely while the
+                        // screen is off and not at all while traffic proves the
+                        // tunnel works. One slow or failed answer must not tear
+                        // down every connection; three consecutive failures do.
+                        val interval = TimeUnit.SECONDS.toNanos(if (power.isInteractive) 30 else 300)
                         try {
-                            probe(dns!!)
+                            if (healthFailures > 0 || System.nanoTime() - relay!!.lastUpstreamSuccess.get() > interval) probe(dns!!)
                             healthFailures = 0
-                            nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                            nextHealthCheck = System.nanoTime() + interval
                         } catch (_: Exception) {
                             if (++healthFailures >= HEALTH_FAILURES) {
                                 if (running) runCatching { callback.event(EngineEvent.HEALTH_FAILED, "", id) }
@@ -304,6 +337,15 @@ class EngineService : Service() {
                     }
                 }
             }
+        }
+
+        /** The configured backend unless the server identifies itself
+         * otherwise; positive identifications are remembered per profile. */
+        private fun backend(profile: TunnelProfile, upstream: Endpoint): ProxyKind {
+            val detected = detectedBackends[profile.id] ?: BackendProbe.detect(upstream)?.also { detectedBackends[profile.id] = it }
+            if (detected != null && detected != profile.proxyKind) log(
+                "The server answered as ${if (detected == ProxyKind.SOCKS5) "SOCKS5" else "HTTP CONNECT"}; using it for this connection. Update the profile's backend type.")
+            return detected ?: profile.proxyKind
         }
 
         /** OpenVPN reports its own counters; zero disables them. */
@@ -408,6 +450,11 @@ class EngineService : Service() {
         fun networkChanged(sameNetwork: Boolean) {
             if (!running) return
             dns?.evictConnections()
+            relay?.networkChanged()
+            management?.networkChange(sameNetwork)
+            // Confirm the tunnel soon; repeated failures trigger a full reconnect.
+            healthFailures = 0
+            nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
             log(if (sameNetwork) "Network addresses changed" else "Physical network changed")
         }
 
@@ -439,8 +486,17 @@ class EngineService : Service() {
         }
     }
 
+    private val power by lazy { getSystemService(PowerManager::class.java) }
+
+    /** Cached and synthetic DNS answers outlive reconnects of a profile. */
+    private class DnsState(val mode: DnsMode, val cache: DnsCache, val synthetic: FakeDns?)
+
     companion object {
+        /** Must equal the owner's TUN MTU for proxy VPN mode. */
+        const val PROXY_MTU = 8500
         private const val HEALTH_FAILURES = 3
+        private val dnsStates = java.util.concurrent.ConcurrentHashMap<String, DnsState>()
+        private val detectedBackends = java.util.concurrent.ConcurrentHashMap<String, ProxyKind>()
         // Android may recreate a bound service before its previous async
         // cleanup finishes. All instances serialize native startup/cleanup on
         // one process executor, including the global packet-engine JNI state.

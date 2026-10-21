@@ -102,6 +102,11 @@ class OpenVpnManagement(
                     command("password ${quoted(name)} ${quoted(profile.openVpnKeyPassphrase)}\n")
                 } else callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session)
             }
+            // After network-change, OpenVPN may hand back its socket so it can
+            // be protected and bound to the new network.
+            line.startsWith("PROTECTFD:") -> descriptors.pollFirst()?.let { descriptor ->
+                try { ParcelFileDescriptor.dup(descriptor).use { callback.protectSocket(it, session) } } finally { Os.close(descriptor) }
+            }
             line.startsWith(">FATAL:") -> callback.event(EngineEvent.OPENVPN_FATAL, "", session)
         }
     }
@@ -151,6 +156,12 @@ class OpenVpnManagement(
             else -> response = "cancel"
         }
         command("needok '$name' $response\n")
+    }
+
+    /** Asks OpenVPN to move to the new physical network. It either floats
+     * the existing socket (sent back for protection) or reconnects. */
+    fun networkChange(sameNetwork: Boolean) {
+        if (running) runCatching { command(if (sameNetwork) "network-change samenetwork\n" else "network-change\n") }
     }
 
     fun byteCount(seconds: Int) {

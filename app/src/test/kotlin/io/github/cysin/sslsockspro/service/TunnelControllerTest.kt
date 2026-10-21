@@ -153,11 +153,13 @@ class TunnelControllerTest {
         assertFalse(platform.status.running || platform.status.vpnActive)
     }
 
+    private fun settle() { scope.advanceTimeBy(TunnelController.NETWORK_SETTLE_MILLIS + 1); scope.runCurrent() }
+
     @Test fun lostNetworkKeepsTrafficBlockedAndRetries() {
         connected()
         platform.network = null
         controller.networkChanged()
-        scope.runCurrent()
+        settle()
         assertEquals(ConnectionStage.RECONNECTING, platform.status.stage)
         assertTrue(platform.tunOpen)
         assertEquals("bind:null", platform.events.last())
@@ -182,5 +184,56 @@ class TunnelControllerTest {
         controller.destroyed()
         assertEquals(ConnectionStatus(), platform.status)
         assertFalse(platform.tunOpen)
+    }
+
+    @Test fun anotherNetworkKeepsTheTunnelAndAsksTheWorkerToCheckIt() {
+        connected()
+        platform.events.clear()
+        platform.network = NetworkSnapshot("cellular", 7)
+        controller.networkChanged()
+        settle()
+        assertEquals(listOf("bind:cellular", "advertise:cellular", "networkChanged:false"), platform.events)
+        assertEquals(ConnectionStage.CONNECTED, platform.status.stage)
+        assertEquals(1, platform.started.size)
+    }
+
+    @Test fun addressChangesOnTheSameNetworkAreDebounced() {
+        connected()
+        platform.events.clear()
+        repeat(3) { index ->
+            platform.network = NetworkSnapshot("wifi", 10 + index)
+            controller.networkChanged()
+            scope.advanceTimeBy(500)
+        }
+        settle()
+        assertEquals(listOf("bind:wifi", "networkChanged:true"), platform.events)
+    }
+
+    @Test fun aRegainedNetworkReconnectsWithoutWaitingForBackoff() {
+        connected()
+        platform.network = null
+        controller.networkChanged(); settle()
+        assertEquals(ConnectionStage.RECONNECTING, platform.status.stage)
+        // The backoff retry finds no network and stops retrying.
+        scope.advanceTimeBy(60_000); scope.runCurrent()
+        assertEquals(ConnectionStage.ERROR, platform.status.stage)
+        assertEquals(1, platform.started.size)
+        assertTrue("Traffic stays blocked without a network", platform.tunOpen)
+        platform.network = NetworkSnapshot("cellular", 3)
+        controller.networkChanged(); settle()
+        assertEquals("Reconnected as soon as the network settled", 2, platform.started.size)
+    }
+
+    @Test fun captivePortalsWaitForSignInInsteadOfRetrying() {
+        connected()
+        platform.network = NetworkSnapshot("hotspot", 1, captivePortal = true)
+        controller.networkChanged(); settle()
+        scope.advanceTimeBy(60_000)
+        assertEquals(ConnectionStage.ERROR, platform.status.stage)
+        assertEquals(1, platform.started.size)
+        assertTrue(platform.tunOpen)
+        platform.network = NetworkSnapshot("hotspot", 2)
+        controller.networkChanged(); settle()
+        assertEquals("Sign-in completion reconnects", 2, platform.started.size)
     }
 }

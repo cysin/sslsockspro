@@ -41,7 +41,9 @@ data class TunnelProfile(
     /** SHA-256 fingerprint of the operator key that signed the imported package. */
     val operatorKeyFingerprint: String = "",
     val modifiedAt: Long = System.currentTimeMillis(),
-)
+) {
+    fun backendCredentials(): Pair<String, String>? = proxyUsername.takeIf { it.isNotEmpty() }?.let { it to proxyPassword }
+}
 
 @Serializable
 enum class ConnectionStage { IDLE, VALIDATING, CONNECTING, LISTENING, CONNECTED, RECONNECTING, STOPPING, ERROR }
