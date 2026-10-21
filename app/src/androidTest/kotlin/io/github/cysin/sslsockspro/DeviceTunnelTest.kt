@@ -219,4 +219,73 @@ class DeviceTunnelTest {
                 mode = ConnectionMode.PROXY_VPN, includedApps = emptyList()))
         }
     }
+
+    /** Opt-in performance baseline through the all-app proxy VPN. The URL is
+     * supplied at runtime; results are reported as an instrumentation status. */
+    @Test fun benchmarkProxyVpn() {
+        val arguments = InstrumentationRegistry.getArguments()
+        val name = arguments.getString("clientFixture")
+        val url = arguments.getString("benchmarkUrl")
+        assumeTrue("Provide clientFixture and benchmarkUrl with tools/device_test.py", name != null && url != null)
+        val bytes = readTestFixture(name!!)
+        val profile = PackageImporter.profiles(PackageImporter.entries(bytes, "client.zip")).single()
+            .copy(name = "Phone benchmark", mode = ConnectionMode.PROXY_VPN, includedApps = emptyList())
+        bytes.fill(0)
+        val original = store.read()
+        store.settings(original.settings.copy(reconnect = false))
+        try {
+            start(profile)
+            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            fun timed(action: () -> Unit): Double {
+                val started = System.nanoTime()
+                action()
+                return (System.nanoTime() - started) / 1_000_000.0
+            }
+            fun percentile(values: List<Double>, fraction: Double): Double =
+                values.sorted()[((values.size - 1) * fraction).toInt()]
+            // Unique names under a reserved domain cannot be answered from a cache.
+            val dns = (1..20).map {
+                timed { runCatching { InetAddress.getAllByName("ssp-${java.util.UUID.randomUUID()}.example.com") } }
+            }
+            val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY)
+                .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
+                .connectTimeout(30, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS).build()
+            try {
+                fun head() = timed {
+                    client.newCall(Request.Builder().url(url!!).head().build()).execute().use { check(it.code < 500) }
+                }
+                head()
+                val sequential = (1..20).map { head() }
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(32)
+                val parallelStarted = System.nanoTime()
+                val parallel = try { (1..32).map { pool.submit<Double> { head() } }.map { it.get() } }
+                    finally { pool.shutdownNow() }
+                val parallelWall = (System.nanoTime() - parallelStarted) / 1_000_000.0
+                var received = 0L
+                val downloadMs = timed {
+                    client.newCall(Request.Builder().url(url!!).build()).execute().use { response ->
+                        val buffer = ByteArray(65536)
+                        response.body!!.byteStream().use { input ->
+                            while (received < 256L * 1024 * 1024) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                received += count
+                            }
+                        }
+                    }
+                }
+                val report = org.json.JSONObject()
+                    .put("dnsP50Ms", percentile(dns, 0.5)).put("dnsP95Ms", percentile(dns, 0.95))
+                    .put("connectP50Ms", percentile(sequential, 0.5)).put("connectP95Ms", percentile(sequential, 0.95))
+                    .put("parallel32P50Ms", percentile(parallel, 0.5)).put("parallel32P95Ms", percentile(parallel, 0.95))
+                    .put("parallel32WallMs", parallelWall)
+                    .put("downloadBytes", received).put("downloadMbps", received * 8 / 1000.0 / downloadMs)
+                instrumentation.sendStatus(0, android.os.Bundle().apply { putString("ssp-benchmark", report.toString()) })
+            } finally { client.connectionPool.evictAll(); client.dispatcher.executorService.shutdown() }
+            stop(fromUi = true)
+        } finally {
+            if (TunnelState.status.value.running) runCatching { stop() }
+            store.write(original)
+        }
+    }
 }

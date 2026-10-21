@@ -338,7 +338,7 @@ private fun TunnelApp() {
                     var versions by remember { mutableStateOf("") }
                     LaunchedEffect(Unit) { versions = withContext(Dispatchers.IO) { runCatching { context.assets.open("native-versions.json").bufferedReader().use { it.readText() } }.getOrDefault("Native components are not packaged yet.") } }
                     Text(versions, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Text("Android 16+ · ARM64 · SSLSocks Pro 1.0.0")
+                    Text("Android 16+ · ARM64 · SSLSocks Pro ${io.github.cysin.sslsockspro.BuildConfig.VERSION_NAME}")
                     var licenses by remember { mutableStateOf("") }
                     LaunchedEffect(Unit) { licenses = withContext(Dispatchers.IO) { context.assets.open("THIRD_PARTY_NOTICES.txt").bufferedReader().use { it.readText() } } }
                     Text(licenses, style = MaterialTheme.typography.bodySmall)

@@ -1,5 +1,7 @@
 import java.util.Properties
 
+val release = Properties().also { properties -> rootProject.file("version.properties").inputStream().use(properties::load) }
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -15,8 +17,8 @@ android {
         applicationId = "io.github.cysin.sslsockspro"
         minSdk = 36
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = release.getProperty("versionCode").toInt()
+        versionName = release.getProperty("versionName")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("proguard-test.pro")
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -71,6 +73,8 @@ android {
     testBuildType = providers.gradleProperty("testBuildType").orElse("debug").get()
     testOptions { unitTests.isReturnDefaultValues = true }
 }
+
+dependencyLocking { lockAllConfigurations() }
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))

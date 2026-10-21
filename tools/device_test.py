@@ -19,11 +19,14 @@ def main():
     parser.add_argument('--server-ip', help='Override connect addresses in the test package only')
     parser.add_argument('--openvpn-fixture', action='store_true', help='Test a disposable local OpenVPN server through ADB')
     parser.add_argument('--provision-profile', help='After successful live tests, retain an all-app proxy VPN profile with this name')
+    parser.add_argument('--benchmark-url', help='HTTPS URL used for the opt-in proxy VPN latency/throughput benchmark')
     parser.add_argument('--test-class', action='append', choices=('NativeComponentsTest', 'ProfileStorageTest', 'DeviceTunnelTest', 'OpenVpnDeviceTest', 'UiDeviceTest'),
                         help='Run selected test classes instead of the complete suite')
     args = parser.parse_args()
     if args.provision_profile and not args.client_package:
         parser.error('--provision-profile requires --client-package')
+    if args.benchmark_url and (not args.client_package or not args.benchmark_url.startswith('https://')):
+        parser.error('--benchmark-url requires --client-package and an https:// URL')
     adb = str(SDK / 'platform-tools/adb')
     result = subprocess.check_output([adb, 'devices'], text=True)
     devices = [line.split()[0] for line in result.splitlines()[1:] if line.endswith('\tdevice')]
@@ -110,6 +113,8 @@ def main():
             command += ['-e', 'clientFixture', fixture]
             if args.provision_profile:
                 command += ['-e', 'provisionProfile', args.provision_profile]
+            if args.benchmark_url:
+                command += ['-e', 'benchmarkUrl', args.benchmark_url]
         if openvpn_fixture:
             command += ['-e', 'openVpnFixture', openvpn_fixture]
         command += ['io.github.cysin.sslsockspro.test/androidx.test.runner.AndroidJUnitRunner']
@@ -117,6 +122,14 @@ def main():
         output = result.stdout + result.stderr
         (ROOT / '.tools/device-tests.txt').write_text(output)
         print(output)
+        reports = [line.split('ssp-benchmark=', 1)[1] for line in output.splitlines() if 'ssp-benchmark=' in line]
+        if reports:
+            import json
+            import time
+            report = json.loads(reports[-1])
+            path = ROOT / ('.tools/benchmark-' + time.strftime('%Y%m%d-%H%M%S') + '.json')
+            path.write_text(json.dumps(report, indent=2) + '\n')
+            print('Benchmark:', json.dumps(report, sort_keys=True), '->', path)
         if 'FAILURES!!!' in output or 'INSTRUMENTATION_FAILED' in output or 'Process crashed' in output or 'OK (' not in output:
             raise SystemExit('Device tests failed; see .tools/device-tests.txt.')
     finally:

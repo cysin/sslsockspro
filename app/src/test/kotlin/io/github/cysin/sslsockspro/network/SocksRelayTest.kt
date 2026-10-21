@@ -157,6 +157,16 @@ class SocksRelayTest {
     }
 
     @Test(timeout = 15000) fun udpDnsIsHandledLocallyAndOtherUdpIsDropped() {
+        // Some build sandboxes deny every UDP send. Skip there instead of
+        // reporting a relay failure; ordinary hosts and CI run this test.
+        val udpPermitted = runCatching {
+            DatagramSocket(0, InetAddress.getLoopbackAddress()).use { receiver ->
+                DatagramSocket(0, InetAddress.getLoopbackAddress()).use { sender ->
+                    sender.send(DatagramPacket(byteArrayOf(0), 1, InetAddress.getLoopbackAddress(), receiver.localPort))
+                }
+            }
+        }.exceptionOrNull()?.message?.contains("Permission denied") != true
+        org.junit.Assume.assumeTrue("Host policy denies loopback UDP", udpPermitted)
         val calls = AtomicInteger()
         SocksRelay(Endpoint("127.0.0.1", 9), ProxyKind.HTTP_CONNECT) { query ->
             calls.incrementAndGet(); TunneledDns.response(Message(query), 0).toWire()

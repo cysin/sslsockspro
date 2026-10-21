@@ -5,10 +5,35 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tarfile
 import zipfile
-from bootstrap import ROOT, DOWNLOADS, fetch
+from bootstrap import ROOT, DOWNLOADS, SDK, fetch
+
+
+def release_version():
+    values = {}
+    for line in (ROOT / 'version.properties').read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith('#'):
+            key, _, value = line.partition('=')
+            values[key.strip()] = value.strip()
+    name, code = values.get('versionName', ''), values.get('versionCode', '')
+    if not re.fullmatch(r'\d+\.\d+\.\d+', name) or not code.isdigit():
+        raise SystemExit('version.properties needs a semantic versionName and numeric versionCode.')
+    return name, int(code)
+
+
+def apk_version(apk):
+    aapt2 = sorted((SDK / 'build-tools').glob('*/aapt2'))
+    if not aapt2:
+        raise SystemExit('Run tools/bootstrap.py to install Android build tools.')
+    badging = subprocess.check_output([str(aapt2[-1]), 'dump', 'badging', str(apk)], text=True)
+    match = re.search(r"versionCode='(\d+)' versionName='([^']+)'", badging)
+    if not match:
+        raise SystemExit('Could not read the APK version.')
+    return match[2], int(match[1])
 
 
 def main():
@@ -24,12 +49,16 @@ def main():
         abis = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/')}
         if abis != {'arm64-v8a'}:
             raise SystemExit('Release APK must contain ARM64 only.')
-    apk = output / 'sslsockspro-1.0.0-arm64.apk'
+    version, code = release_version()
+    if apk_version(source_apk) != (version, code):
+        raise SystemExit('Release APK version does not match version.properties; rebuild it.')
+    apk = output / ('sslsockspro-' + version + '-arm64.apk')
     shutil.copyfile(source_apk, apk)
-    package = output / 'sslsockspro-1.0.0-source.tar.gz'
+    package = output / ('sslsockspro-' + version + '-source.tar.gz')
     roots = ['app/src', 'tools', 'gradle', 'gradlew', 'gradlew.bat', 'build.gradle.kts', 'settings.gradle.kts',
              'gradle.properties', 'app/build.gradle.kts', 'app/proguard-rules.pro', 'app/proguard-test.pro', 'native-dependencies.json',
-             'build-dependencies.json', 'README.md', 'HANDOFF.md', 'VALIDATION.md', 'LICENSE', 'COPYING', '.gitignore']
+             'build-dependencies.json', 'version.properties', 'buildscript-gradle.lockfile', 'app/gradle.lockfile',
+             '.editorconfig', '.github', 'README.md', 'HANDOFF.md', 'VALIDATION.md', 'LICENSE', 'COPYING', '.gitignore']
     files = set()
     epoch = int(os.environ.get('SOURCE_DATE_EPOCH', '1767225600'))
     def metadata(info):
