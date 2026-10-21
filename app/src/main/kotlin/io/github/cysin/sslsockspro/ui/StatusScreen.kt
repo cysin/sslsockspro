@@ -150,17 +150,23 @@ private fun rememberPhysicalNetworkWarnings(): NetworkWarnings {
                 manager.getNetworkCapabilities(network)?.let { !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
                     it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } == true
             }
-            val preferred = networks.sortedByDescending { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true }
-                .firstOrNull()?.let(manager::getNetworkCapabilities)
+            fun transport(capabilities: NetworkCapabilities?): String? = when {
+                capabilities == null -> null
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile data"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> null
+                else -> "Other"
+            }
+            val active = manager.activeNetwork?.let(manager::getNetworkCapabilities)
+            val available = networks.mapNotNull { network -> manager.getNetworkCapabilities(network)?.let { capabilities ->
+                NetworkTransport(transport(capabilities) ?: "Other",
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+            } }
             warnings = NetworkWarnings(
                 captivePortal = networks.any { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true },
                 strictPrivateDns = networks.any { !manager.getLinkProperties(it)?.privateDnsServerName.isNullOrBlank() },
-                transport = preferred?.let { capabilities -> when {
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile data"
-                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
-                    else -> "Other"
-                } })
+                transport = currentNetworkTransport(transport(active), available))
         }
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { update() }
@@ -169,8 +175,10 @@ private fun rememberPhysicalNetworkWarnings(): NetworkWarnings {
             override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) { update() }
         }
         update()
+        // A VPN's advertised transport can change after the physical
+        // callback. Observe both so the label follows that later update.
         manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), callback)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), callback)
         onDispose { manager.unregisterNetworkCallback(callback) }
     }
     return warnings

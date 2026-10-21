@@ -38,15 +38,23 @@ class ProfileStoreTest {
 
     @Test fun formatOneSnapshotsMigrateToSplitStorage() {
         val first = profile("first")
-        val legacy = """{"format":1,"profiles":[${kotlinx.serialization.json.Json.encodeToString(TunnelProfile.serializer(), first)}],""" +
-            """"settings":{"selectedProfileId":"${first.id}","reconnect":false,"darkTheme":true}}"""
+        val selected = profile("selected").copy(config = "client = yes\n[proxy]\naccept = 127.0.0.1:33008\n",
+            includedApps = listOf("io.github.cysin.sslsockspro"), proxyUsername = "fixture-user", proxyPassword = "fixture-password")
+        val profiles = listOf(first, selected)
+        val encoder = kotlinx.serialization.json.Json { encodeDefaults = true }
+        val encoded = profiles.joinToString(",") { encoder.encodeToString(TunnelProfile.serializer(), it) }
+        val legacy = """{"format":1,"profiles":[$encoded],""" +
+            """"settings":{"selectedProfileId":"${selected.id}","reconnect":false,"darkTheme":true}}"""
         File(folder.root, "profiles.enc").writeBytes(sealer.seal(legacy.toByteArray(), "sslsockspro.profile-storage.v1".toByteArray()))
-        assertEquals(AppSettings(selectedProfileId = first.id, reconnect = false, darkTheme = true), store().settings())
+        val settings = AppSettings(selectedProfileId = selected.id, reconnect = false, darkTheme = true)
+        assertEquals(settings, store().settings())
         assertTrue(File(folder.root, "settings.enc").exists())
         val migrated = store().read()
         assertEquals(Backup.FORMAT, migrated.format)
-        assertEquals(DnsMode.DOH, migrated.profiles.single().dnsMode)
-        assertEquals(first.id, migrated.settings.selectedProfileId)
+        assertEquals(profiles, migrated.profiles)
+        assertTrue(migrated.profiles.all { it.dnsMode == DnsMode.DOH })
+        assertEquals(settings, migrated.settings)
+        assertEquals(migrated, store().read())
     }
 
     @Test fun settingsChangesDoNotRewriteCredentialsAndDeletedSelectionsClear() {

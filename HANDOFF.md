@@ -4,17 +4,21 @@ Read README.md and VALIDATION.md before changing this application.
 
 ## Current task: real-phone validation of `privacy-performance-hardening`
 
-Branch `privacy-performance-hardening` (pushed to `origin`) holds eight commits
-after `aa462be` (see `git log aa462be..HEAD`): CI and dependency verification,
+Phone validation started from `a17c695` on `privacy-performance-hardening`,
+nine commits after `aa462be` (see `git log aa462be..HEAD`): CI and dependency
+verification,
 robustness fixes, the `TunnelController` state machine and split storage,
 privacy hardening, the non-blocking relay and DNS work, quick controls and
-OpenVPN challenges, native hardening with Keystore OpenVPN keys, and docs.
-Everything passed host checks (85 JVM tests, release lint, all builds; see
-VALIDATION.md), but **nothing has run on a phone yet**. Your job is to validate it
-on the user's connected Android 16 ARM64 phone, fix what fails, and record the
-results. The phone holds the user's real profiles; the user asked to test with
-the saved profiles whose stunnel tunnels listen on local ports **33009** and
-**33008**.
+OpenVPN challenges, native hardening with Keystore OpenVPN keys, docs, and the
+initial phone-test handoff.
+The completed 2026-10-21 phone validation adds fixes and regression tests on
+top of that base. See VALIDATION.md for the host checks, Android 16 ARM64
+results, manual checks and remaining limitations. The user authorized committing
+and pushing these changes after validation. The phone holds the user's real
+profiles; the user asked to test with the saved profiles whose stunnel tunnels listen on local ports
+**33009** and **33008**.
+The user explicitly requested keeping the instrumentation test APK installed
+after validation. The main app is the final non-debuggable optimized build.
 
 Ground rules: do not change production servers, Android Private DNS, Wi-Fi,
 always-on VPN or lockdown settings; do not reboot, uninstall, `pm clear`, or
@@ -30,23 +34,18 @@ credential.helper="store --file=$HOME/.git-credentials" push`).
    `$ADB shell getprop ro.product.cpu.abi` (arm64-v8a), and the installed signer:
    `$ADB shell pm path io.github.cysin.sslsockspro`, pull that `base.apk`, then
    `JAVA_HOME=$PWD/.tools/jdk .tools/android-sdk/build-tools/37.0.0/apksigner verify --print-certs base.apk`.
-2. Signing certificates seen so far (SHA-256):
-   - `2a1fe8cacdd20aceb723c95ed05d22efa34616c4bb138527d0f2df1cbc62ae55`: the old
-     debug key that signed the `*-phone-update.apk` builds in `out/`, which is
-     most likely what the phone runs.
-   - `7d59dfada238c9b44545668b7ed3720120ff96e7651c7b1c5810835e2328ca9b`: the
-     release key (`SSLSOCKSPRO_SIGNING_PROPERTIES`); not on this machine.
-   - `fab032fd0ba68fc72ee9ef5747a67cc90324e42ed997a9ec47c3246a0176dcab`: the
-     debug key that `~/.android/debug.keystore` on this machine (created
-     2026-10-21) puts on every new build.
-   Android updates an app in place only when the certificate matches. **If the
-   phone's signer is not `fab032fd…`, `adb install -r` fails, and uninstalling
-   would destroy the profiles and their Keystore keys.** Then either:
+2. Compare the installed APK's signing certificate with the actual new debug,
+   test and `minifiedDebug` APKs; do not infer it from an earlier key inventory.
+   The 2026-10-21 phone run found that all of these already matched using the
+   existing local debug key, so an in-place upgrade was possible without
+   replacing a key or uninstalling. Keep certificate digests in private local
+   evidence only. Android updates an app in place only when the certificate
+   matches. **On a mismatch, stop before installing; uninstalling would destroy
+   the profiles and their Keystore keys.** Ask the user to choose:
    - A (preferred): ask the user for the keystore that signed the installed
-     app (old `debug.keystore`, or the release signing properties). Move the
-     current `~/.android/debug.keystore` aside, put the old one in place (or
-     export `SSLSOCKSPRO_SIGNING_PROPERTIES`), and rebuild. The update then keeps
-     all data.
+     app (old `debug.keystore`, or the release signing properties). Obtain
+     explicit permission before moving or replacing any signing key, then
+     rebuild with that signer. The update keeps all data.
    - B: only with the user's explicit agreement — the user creates **Settings →
      Create encrypted local backup** in the installed app and keeps the
      password; then uninstall, install the new build, and restore that backup
@@ -63,6 +62,9 @@ credential.helper="store --file=$HOME/.git-credentials" push`).
    `$ADB shell run-as io.github.cysin.sslsockspro sh -c 'mkdir -p files/pre-upgrade && cp -p no_backup/profiles.enc* files/pre-upgrade/'`.
    Only then run `device_test.py` or open the app. (`device_test.py` installs
    and starts the tests in one go, so it leaves no point to copy in between.)
+   The original pre-upgrade copy now exists from the completed phone run: keep
+   it untouched. On later runs, do not repeat that copy over the existing
+   directory or host archive; use a fresh directory if a new snapshot is needed.
 
 ### Step 1 — build
 
@@ -197,9 +199,12 @@ Privacy has priority over reach and convenience. Changes must keep all of these:
 2. Internal endpoints serve only this app: in VPN modes the selected stunnel
    tunnel listens on a per-session loopback port whose only client is the
    authenticated relay; native `accept()` and the relay admit a client only if
-   `ConnectivityManager.getConnectionOwnerUid` names this app. A startup probe
-   disables the owner check (keeping the private port) where the platform
-   cannot attribute loopback connections; log that case.
+   `ConnectivityManager.getConnectionOwnerUid` names this app. The startup probe
+   retries briefly because VPN UID-range changes can arrive asynchronously.
+   Initially unsupported platforms keep the private port and log the disabled
+   owner check. Once attribution has worked in the worker process, a later
+   timeout aborts startup instead of disabling the guard. Interrupted startup
+   must also abort rather than selecting the unsupported-platform fallback.
 3. Nothing identifies the device to servers: OpenVPN rejects `push-peer-info`,
    `UV_`/`IV_` variables and options nested in `setenv opt` that would be
    rejected directly. The VPN session name is generic.
@@ -245,6 +250,7 @@ Paths are under `app/src/main/kotlin/io/github/cysin/sslsockspro` unless noted.
 | DNS: DoH, cache, proxy-side resolution | `network/TunneledDns.kt`, `network/DnsService.kt` |
 | Redaction | `privacy/Redactor.kt` |
 | Compose UI | `ui/TunnelApp.kt`, `ui/MainViewModel.kt`, `ui/*Screen.kt`, `ui/ProfileEditor.kt`, `ui/AppPicker.kt`, `ui/SecureTextField.kt` |
+| Shared-intent consumption / transport selection | `ui/PendingEvents.kt`, `ui/NetworkTransport.kt` |
 
 AIDL lives under `app/src/main/aidl`.
 
@@ -301,6 +307,9 @@ AIDL lives under `app/src/main/aidl`.
 - UI drafts and document results survive rotation in `MainViewModel`, never in
   a saved-state bundle. Active profiles are immutable until disconnected.
   Permission dialogs are sequenced. Shared files are always confirmed.
+- Collect incoming shared intents from a stable effect. Acknowledge an event
+  after its bounded document read, without discarding a newer event or turning
+  cancellation into a user-facing error.
 
 ## Build and native changes
 

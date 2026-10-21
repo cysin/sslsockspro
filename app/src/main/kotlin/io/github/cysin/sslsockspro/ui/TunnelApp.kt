@@ -32,6 +32,7 @@ import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.service.ConnectionService
 import io.github.cysin.sslsockspro.service.TunnelState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -71,17 +72,15 @@ internal fun TunnelApp(incoming: MutableStateFlow<Intent?>) {
         }
     }
     // Opened or shared by another app: always confirmed, never attached to a draft.
-    val shared by incoming.collectAsStateWithLifecycle()
-    LaunchedEffect(shared) {
-        val intent = shared ?: return@LaunchedEffect
-        incoming.value = null
+    LaunchedEffect(incoming) {
+      incoming.consumePending { intent ->
         val uris = when (intent.action) {
             Intent.ACTION_VIEW -> listOfNotNull(intent.data)
             Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
             Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> emptyList()
         }.filter { it.scheme == "content" }
-        if (uris.isEmpty()) return@LaunchedEffect
+        if (uris.isEmpty()) return@consumePending
         try {
             if (uris.size == 1 && filename(uris.single()).endsWith(".sspbackup", ignoreCase = true)) {
                 require(!TunnelState.status.value.running) { "Disconnect before restoring a backup." }
@@ -90,7 +89,9 @@ internal fun TunnelApp(incoming: MutableStateFlow<Intent?>) {
                 }
                 ui.password = ""; ui.passwordAction = "restore"
             } else ui.importShared(read(uris))
-        } catch (failure: Exception) { ui.error = failure.message ?: "Could not open the shared files" }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { ui.error = failure.message ?: "Could not open the shared files" }
+      }
     }
     val restoreFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) scope.launch {

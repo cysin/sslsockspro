@@ -47,6 +47,7 @@ class DeviceTunnelTest {
     private val context get() = instrumentation.targetContext
     private val store get() = (context.applicationContext as TunnelApplication).profiles
     private var activity: android.app.Activity? = null
+    private var logsBeforeStart = emptySet<String>()
 
     private fun await(timeout: Long = 30000, condition: () -> Boolean) {
         val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout)
@@ -70,7 +71,14 @@ class DeviceTunnelTest {
         instrumentation.runOnMainSync { activity!!.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
         Thread.sleep(500)
         if (profile.mode != ConnectionMode.LOCAL_PROXY) permission()
+        logsBeforeStart = TunnelState.logs.value.toSet()
         instrumentation.runOnMainSync { ConnectionService.start(context, profile) }
+    }
+
+    private fun awaitGuardedConnection() {
+        await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+        assertFalse("This phone must keep the internal endpoint owner check enabled",
+            TunnelState.logs.value.any { it !in logsBeforeStart && it.contains("cannot attribute loopback connections") })
     }
     private fun textNode(label: String): AccessibilityNodeInfo? {
         fun find(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -166,7 +174,7 @@ class DeviceTunnelTest {
                 permission()
                 for (dnsMode in DnsMode.entries) {
                     start(saved.copy(mode = ConnectionMode.PROXY_VPN, dnsMode = dnsMode))
-                    await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+                    awaitGuardedConnection()
                     // VPN modes move the selected tunnel to a private internal port.
                     assertThrows("Port $port must not listen in VPN mode", java.io.IOException::class.java) {
                         Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 1000) }
@@ -188,7 +196,7 @@ class DeviceTunnelTest {
             // Worker death keeps the blocking TUN; a new connection recovers.
             val first = profiles.first().copy(mode = ConnectionMode.PROXY_VPN, dnsMode = DnsMode.DOH)
             start(first)
-            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            awaitGuardedConnection()
             val worker = context.getSystemService(ActivityManager::class.java).runningAppProcesses
                 .first { it.processName == context.packageName + ":engine" }
             Process.killProcess(worker.pid)
@@ -196,7 +204,7 @@ class DeviceTunnelTest {
             assertTrue("Owner must retain a blocking TUN after worker death", TunnelState.status.value.vpnActive)
             assertThrows(java.io.IOException::class.java) { Socket().use { it.connect(InetSocketAddress("1.1.1.1", 443), 2000) } }
             start(first)
-            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            awaitGuardedConnection()
             https(url)
             stop(fromUi = true)
         } finally {
@@ -216,7 +224,7 @@ class DeviceTunnelTest {
         try {
             repeat(3) {
                 start(selected!!)
-                await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+                awaitGuardedConnection()
                 stop(fromUi = true)
             }
             start(selected!!)
@@ -253,7 +261,7 @@ class DeviceTunnelTest {
             stop()
             permission()
             start(profile.copy(mode = ConnectionMode.PROXY_VPN, includedApps = emptyList()))
-            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            awaitGuardedConnection()
             assertTrue(TunnelState.status.value.vpnActive)
             val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
             val vpn = connectivity.allNetworks.first { connectivity.getNetworkCapabilities(it)
@@ -300,7 +308,7 @@ class DeviceTunnelTest {
                 Socket().use { it.connect(InetSocketAddress("1.1.1.1", 443), 2000) }
             }
             start(profile.copy(mode = ConnectionMode.PROXY_VPN))
-            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            awaitGuardedConnection()
             stop(fromUi = true)
             completed = true
         } finally {
@@ -330,7 +338,7 @@ class DeviceTunnelTest {
         store.settings(original.settings.copy(reconnect = false))
         try {
             start(profile)
-            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            awaitGuardedConnection()
             fun timed(action: () -> Unit): Double {
                 val started = System.nanoTime()
                 action()

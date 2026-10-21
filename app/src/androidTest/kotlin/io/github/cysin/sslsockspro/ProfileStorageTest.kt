@@ -2,11 +2,13 @@ package io.github.cysin.sslsockspro
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.cysin.sslsockspro.data.KeystoreSealer
 import io.github.cysin.sslsockspro.data.ProfileStore
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ProxyKind
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -15,6 +17,30 @@ import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class ProfileStorageTest {
+    /** Compare with the sealed snapshot copied before the first upgraded
+     * launch. Read a disposable copy so migration never alters that snapshot. */
+    @Test fun upgradedStorePreservesPreUpgradeSnapshot() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val before = File(context.filesDir, "pre-upgrade")
+        assumeTrue("Copy the sealed pre-upgrade snapshot before the first launch",
+            before.listFiles()?.any { it.name.startsWith("profiles.enc") } == true)
+        val scratch = File(context.cacheDir, "pre-upgrade-check-${java.util.UUID.randomUUID()}")
+        check(scratch.mkdir())
+        try {
+            before.listFiles()!!.filter { it.isFile &&
+                (it.name.startsWith("profiles.enc") || it.name.startsWith("settings.enc")) }
+                .forEach { it.copyTo(File(scratch, it.name)) }
+            val expected = ProfileStore(scratch, KeystoreSealer()).read()
+            val actual = (context.applicationContext as TunnelApplication).profiles.read()
+            fun normalized(profiles: List<TunnelProfile>) = profiles.sortedBy { it.id }.map { it.copy(modifiedAt = 0) }
+            // Do not let assertion messages print credentials or profile IDs.
+            assertTrue("Profiles and credentials must match the pre-upgrade snapshot",
+                normalized(expected.profiles) == normalized(actual.profiles))
+            assertTrue("Selection and settings must match the pre-upgrade snapshot",
+                expected.settings == actual.settings)
+        } finally { scratch.deleteRecursively() }
+    }
+
     @Test fun keystoreEncryptionAtomicEditsAndAuthenticatedBackup() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val store = (context.applicationContext as TunnelApplication).profiles

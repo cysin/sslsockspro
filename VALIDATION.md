@@ -1,50 +1,136 @@
 # Validation record
 
-## Privacy, performance and reliability overhaul (2026-10-21)
+## Android 16 phone validation (2026-10-21)
 
-Branch `privacy-performance-hardening`, eight commits after `aa462be`. Verified on
-the Linux x86-64 build host without a phone:
+Validated `privacy-performance-hardening` at `a17c695` (nine commits after
+`aa462be`) plus the fixes below, on the connected Android 16/API 36 ARM64
+phone with 4 KB pages. The user authorized committing and pushing these changes
+after validation. Tests used the user's
+saved profiles for local ports **33009** and **33008**. Raw phone evidence,
+sealed snapshots and disposable packages remain in ignored local files; no
+phone identifiers, production addresses, certificates or credentials are
+recorded here.
 
-| Check | Result |
+The installed app and all new test/update APKs already had matching signing
+certificates using the existing local key. The main app was updated in place;
+no signing key was moved or replaced, main-app data was not cleared, and the
+phone was not rebooted. Before the first upgraded launch, the debug APK was
+installed manually and `no_backup/profiles.enc*` was copied both into the app's
+private `files/pre-upgrade` directory and to a private host archive. Storage
+then migrated from format 1 to 2.
+
+The final device comparison read a disposable copy of that sealed snapshot and
+passed: all profiles and credentials matched, and selection/settings matched
+exactly. Profile comparison ignores ordering and `modifiedAt`, which ordinary
+editor saves can change. The original 33009 selection and DNS choices were
+restored. The final installed APK is the non-debuggable `minifiedDebug` build;
+its checksum matches the built APK. The app ends Disconnected with no system
+VPN network or native engine children.
+The instrumentation package `io.github.cysin.sslsockspro.test` remains installed
+at the user's explicit request; neither application was uninstalled.
+
+| Automated/static check | Actual result |
 | --- | --- |
-| JVM tests | 85 run, 0 failures; 1 skipped because this host's sandbox denies loopback UDP (the UDP DNS relay test runs on ordinary hosts and CI) |
-| Release lint | 0 errors; 4 warnings: the existing ChromeOS ABI and Bouncy Castle EST helper warnings, plus Gradle 9.8.2 and kotlinx-serialization 1.12.0 being available (seen now that lint can query repositories) |
-| Builds | debug, debug test, `minifiedDebug` and unsigned release succeed with Gradle dependency verification and lockfiles enforced |
-| Release APK | 8.7 MB (was 15.2 MB); `classes.dex` 2.9 MB (was 9.2 MB, of which 7,455 Bouncy Castle classes were kept) |
-| Native engines | MTE heap-tagging note in both executables, `_FORTIFY_SOURCE` checked calls in all three ELF files, non-executable stacks, 16 KB alignment; stunnel 4.95 MB and OpenVPN 5.55 MB after OpenSSL feature trimming |
-| Signed package interop | A package from `tools/sign_package.py` verifies with the OpenSSL CLI and in the app's verifier (JVM test fixture) |
-| SBOM | 130 components (120 release runtime artifacts, 88 with verified SHA-256, and 10 native sources) |
+| JVM tests after all fixes | **96 passed**, 0 failures/errors/skips. This run permitted loopback UDP; the earlier sandbox-dependent UDP skip did not occur. |
+| Release lint | **0 errors**, 4 existing warnings: `AndroidGradlePluginVersion`, `NewerVersionAvailable`, `ChromeOsAbiSupport`, `TrustAllX509TrustManager`. |
+| Builds | debug, debug androidTest, `minifiedDebug`, unsigned release passed; dependency verification and lockfiles remain enforced. Optimized APK is approximately 8.7 MB. |
+| Full phone suite | `python3 tools/device_test.py --saved-profile-ports 33009,33008 --openvpn-fixture`: **10 passed, 2 conditional skips** (12 methods). This full run followed the owner-check and transport-label fixes. |
+| Final UI/import fix coverage | Three additional JVM event-consumption tests, `UiDeviceTest` (navigation, theme, drafts/password state across recreation), actual optimized-package sharing and a final optimized VPN/Chrome connection passed. The final pre-upgrade snapshot comparison also passed. |
+| Saved-profile network coverage | Both ports passed local-proxy operation, VPN with DoH and proxy-side DNS, VPN/default resolver and HTTPS checks, IPv6 blocking, worker-death blocking/recovery and explicit disconnect. |
+| Disposable OpenVPN fixture | Direct and stunnel-carried authenticated packet transport, TLS 1.3, Keystore-held client key via PK_SIGN, IPv6-only assignment and missing-DNS blocking passed. Server logs contained no hardware-address, kernel-version or user-variable peer information. |
+| Native engines | stunnel and OpenVPN both ran and rejected same-app reads of their process environment in the non-dumpable check; JNI loaded. Native sources were unchanged; Gradle's native pre-build verification passed with the existing 16 KB alignment, hardening and MTE checks. |
 
-JVM tests now cover the connection state machine (revocation, worker death,
-permanent errors, unconfirmed shutdown, always-on, debounced network changes,
-soft handover, immediate reconnect when a network returns, captive portals,
-challenges and notices), split storage with format-1 migration and AtomicFile
-recovery, key parsing without JCA providers (RSA, EC, Ed25519, encrypted PEM and
-PBES2 PKCS#8), gateway failover rendering, OpenVPN identity and TLS policy,
-redaction, DoH padding/User-Agent/preemptive relay credentials, the relay
-reactor (pipelined handshakes, SOCKS5 pipelining with credentials, address
-types, synthetic names, the session limit, warm connections and stale-warm
-retry, owner checks), DNS cache/synthetic resolution/backend probing, signed
-manifests, OpenVPN challenge formats and the Keystore key migration rewrite.
+The full-suite skips were the user-disabled benchmark and the legacy live test
+that needs a supplied client-package path; the saved-profile equivalent ran for
+both requested profiles. After the final UI-only import fix, relevant UI,
+sharing, storage-integrity and optimized connectivity checks were rerun rather
+than claiming another full OpenVPN/network suite run.
 
-**Not yet verified on a phone.** No device was connected during this work. Before
-a release, run `tools/device_test.py` with the client package, the OpenVPN
-fixture and `--benchmark-url`, and the ordinary-UI checks on `minifiedDebug`,
-and record here:
+### Nine ordinary-UI checks on the optimized APK
 
-- The loopback owner check: the worker log must not report that the platform
-  cannot attribute loopback connections, and `adb shell` (another UID) must be
-  refused by the internal stunnel and relay ports while the VPN is connected.
-- Proxy VPN with MTU 8500, the non-blocking relay, warm connections, backend
-  identification and proxy-side DNS: browsing, downloads and DNS.
-- Wi-Fi/mobile handover without a full reconnect; reconnection after loss.
-- OpenVPN through a Keystore key (PK_SIGN), the absence of identifying peer
-  information at the fixture server, TLS 1.3 enforcement, and challenges.
-- Non-dumpable native engines (`NativeComponentsTest`).
-- `FLAG_SECURE` (screen capture is black), lock-screen notification text, the
-  Quick Settings tile, launcher shortcuts targeting a non-exported activity, boot
-  start of a local proxy, and opening/sharing packages from another app.
-- Benchmarks compared with a baseline built from commit `da870eb`.
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | Migration, profiles, selection and settings | **Pass.** Both saved profiles worked; final sealed-snapshot comparison covered every saved profile/credential and exact selection/settings. |
+| 2 | Each profile's VPN, Chrome and status | **Pass.** Chrome hostname HTTPS and Test connection worked with both profiles. Duration, traffic rates and current network rendered. These saved profiles did not trigger a backend-correction notice; backend detection has automated/JVM coverage. |
+| 3 | Internal listener ownership | **Pass after fix.** Configured ports 33009/33008 were closed in VPN mode. Both internal listeners rejected shell-UID probes without data (observed 37–71 ms), relay diagnostics counted rejected local clients, and corrected runs had no owner-attribution fallback warning, including after network recovery. |
+| 4 | Resolve names at the proxy server | **Pass.** Enabled through the ordinary 33008 editor, saved, reconnected, browsed HTTPS and ran Test connection, then restored the original option. Automated tests exercised both DNS modes on both profiles. |
+| 5 | Network handover and full loss | **Pass after fixes.** User-operated mobile-to-Wi-Fi handover kept the connection and its uptime; Wi-Fi-only HTTPS/DNS passed. After about 16.7 seconds without a physical Internet network, restoration triggered connection in about 2 seconds; the internal owner checks remained effective. |
+| 6 | Privacy surfaces | **Partial pass.** App screenshots were black; the actual recent-apps card hid its content. Profile input reported `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING`. Lock-screen notification text was **not tested** because the user's original notification permission was denied/user-fixed; that setting was preserved. |
+| 7 | Tile and launcher shortcuts | **Pass with a limitation.** Unlocked tile Disconnect and launcher Disconnect removed the VPN. Connect correctly opened the app while notification permission was denied. Actual launcher shortcuts worked with `ShortcutActivity` still non-exported. A locked tile tap kept the VPN connected, but manual unlocking did not execute that queued request on this phone; another unlocked tap was needed. Deferred execution after unlocking remains unresolved. |
+| 8 | External client-package sharing | **Pass after fix.** Shared a disposable package from the phone's file manager. The import confirmation showed a fingerprint matching the throwaway operator key used by `tools/sign_package.py`. Cancelled the confirmation; no test profile was saved. |
+| 9 | System VPN disconnect / optional boot start | **Disconnect passed.** The real Android VPN dialog removed the VPN, returned the app to Disconnected with Connect enabled, and left no native children. **Boot start skipped** at the user's request; no reboot performed. |
+
+The user performed all Wi-Fi/mobile switches. The first Wi-Fi Chrome attempt
+failed because that network had a pre-existing HTTP proxy pointing at the
+configured local port, which is intentionally closed in VPN mode. The user
+removed that proxy; Wi-Fi browsing then passed. No production server, Android
+Private DNS, always-on VPN or lockdown setting was changed. Final checks match
+the original values for Private DNS, always-on/lockdown and Wi-Fi state; the
+phone is back on mobile data with Wi-Fi off. The user's intentional proxy
+removal was not reversed.
+
+### Failures found and corrected
+
+After a blocking VPN was replaced during network recovery, Android briefly
+could not attribute a self-connection. The original one-shot probe treated
+that timing window as an unsupported platform and disabled the guard for the
+session. `LoopbackOwnerProbe` now retries for up to two seconds and remembers
+successful attribution for the worker's lifetime. Once verified, a later
+timeout aborts startup instead of disabling the guard; interruption also aborts.
+Four deterministic JVM cases and a repeated real-phone loss/recovery plus
+shell-UID rejection check passed.
+
+The status screen could display Mobile data while the active VPN advertised
+Wi-Fi, because an unrelated mobile network remained validated. The screen now
+prefers the active network's transport and observes VPN transport changes.
+Three JVM cases and the Wi-Fi-only device/UI checks passed.
+
+External sharing initially showed “The coroutine scope left the composition”.
+Clearing the shared intent changed its own `LaunchedEffect` key and cancelled
+the suspended document read. A stable collector now acknowledges an event
+after reading it and preserves a newer event arriving during that read;
+cancellation is propagated. Three JVM cases and actual file-manager sharing on
+the corrected optimized APK passed.
+
+The first OpenVPN fixture run also exposed an incorrect test assertion: it
+rejected a private key still required by the fixture's stunnel configuration.
+The assertion now permits stunnel-referenced credentials while checking that
+OpenVPN-only files contain no private key. Cleanup includes assertion failures,
+and a JVM case covers the shared-credential rewrite. No product key-migration
+change or relaxation was needed.
+
+### Measurements and remaining limits
+
+**Throughput benchmark and before/after baseline: skipped at the user's
+request.** No large-file URL was supplied or chosen, and no throughput or
+speedup claim is made. These isolated Test connection observations only verify
+connectivity; they are not a benchmark:
+
+| Functional check | Observed DNS round trip |
+| --- | --- |
+| 33009, mobile data, final optimized build | 461 ms |
+| 33009, Wi-Fi only | 278 ms |
+| 33008, DoH | 398 ms |
+| 33008, proxy-side DNS | 246 ms |
+
+- Reboot/boot auto-start was skipped by user choice.
+- No OpenVPN server with an OTP challenge was available. Challenge parsing has
+  JVM coverage; actual interactive authentication remains untested.
+- Lock-screen notification text and notification-permission-granted quick
+  connection were not exercised with the user's denied notification setting.
+- Locked-tile deferred action did not execute automatically after unlocking on
+  this phone; use another unlocked tap. Recheck that interaction before claiming
+  full quick-control coverage.
+- No real 16 KB-page device, other OEM/version, sustained background/battery
+  run, captive portal, whole-app-death lockdown test or large-file/MTU stress
+  test was covered. The existing MTU 8500 passed ordinary traffic only.
+- The disposable OpenVPN fixture validates authenticated packet transport,
+  not production Internet forwarding; production proxy IPv6 egress was not
+  tested. No production server changes were made to extend coverage.
+
+The branch is ready for merge review with these limits recorded. Publication
+should retain these limits and first recheck the locked-tile interaction;
+missing OTP/notification/hardware coverage must not be described as passed.
 
 Earlier records below describe the previous implementation.
 

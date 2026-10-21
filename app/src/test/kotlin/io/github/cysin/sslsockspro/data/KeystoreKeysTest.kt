@@ -81,6 +81,18 @@ class KeystoreKeysTest {
         assertTrue(String(Base64.getDecoder().decode(moved.files.getValue("client.pem"))).contains("PRIVATE KEY"))
     }
 
+    @Test fun inlineOpenVpnKeyIsRemovedWhileSharedStunnelCredentialsStay() {
+        val vpn = profile("client\nremote 192.0.2.1 1194\n<ca>\n${pem(PemObject("CERTIFICATE", ca.encoded))}</ca>\n" +
+            "<cert>\n$certificatePem</cert>\n<key>\n$keyPem</key>\n",
+            mapOf("ca.crt" to b64(pem(PemObject("CERTIFICATE", ca.encoded))), "client.pem" to b64(certificatePem + keyPem)),
+            stunnel = StunnelDocument.template("192.0.2.1"))
+        val moved = KeystoreKeys.withoutKeyMaterial(vpn, KeystoreKeys.identity(vpn)!!)
+        assertFalse(moved.openVpnConfig.contains("PRIVATE KEY"))
+        assertEquals(vpn.files, moved.files)
+        assertEquals(vpn.config, moved.config)
+        OpenVpnDocument.validate(moved.openVpnConfig)
+    }
+
     @Test fun pkcs12BundlesBecomeCertificateFiles() {
         val bundle = KeyStore.getInstance("PKCS12").apply {
             load(null, null)

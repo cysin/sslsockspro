@@ -70,10 +70,15 @@ class OpenVpnDeviceTest {
             // The client key moves into Android Keystore; OpenVPN asks the app
             // to sign (PK_SIGN) and never sees the private key.
             val keystore = io.github.cysin.sslsockspro.data.KeystoreKeys.migrate(profile.copy(openVpnViaStunnel = false))
-            assertTrue("The fixture key must move into Keystore", keystore.openVpnKeyAlias.isNotEmpty())
-            assertFalse(keystore.openVpnConfig.contains("PRIVATE KEY"))
-            assertFalse(keystore.files.values.any { String(java.util.Base64.getDecoder().decode(it)).contains("PRIVATE KEY") })
             try {
+                assertTrue("The fixture key must move into Keystore", keystore.openVpnKeyAlias.isNotEmpty())
+                assertFalse(keystore.openVpnConfig.contains("PRIVATE KEY"))
+                // The fixture also uses this identity for stunnel. Those
+                // files must stay available to stunnel; OpenVPN uses PK_SIGN.
+                val stunnelFiles = io.github.cysin.sslsockspro.config.StunnelDocument.parse(keystore.config)
+                    .credentialReferences().map(io.github.cysin.sslsockspro.data.Credentials::referenceName).toSet()
+                assertFalse("OpenVPN-only files must not retain a private key", keystore.files.filterKeys { it !in stunnelFiles }
+                    .values.any { String(java.util.Base64.getDecoder().decode(it)).contains("PRIVATE KEY") })
                 store.save(keystore)
                 instrumentation.runOnMainSync { ConnectionService.start(context, keystore) }
                 await { TunnelState.status.value.stage == ConnectionStage.CONNECTED }

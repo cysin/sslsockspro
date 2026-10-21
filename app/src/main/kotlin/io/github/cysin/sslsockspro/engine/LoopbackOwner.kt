@@ -21,16 +21,22 @@ class LoopbackOwner(context: Context) {
         manager.getConnectionOwnerUid(OsConstants.IPPROTO_TCP, peer, local) == Process.myUid()
     }.getOrDefault(false)
 
-    /** Whether this Android build attributes this app's own loopback
-     * connections. If not, the guard cannot be enforced and is not used. */
-    fun available(): Boolean = runCatching {
+    /** Wait for the active VPN's UID range to become visible to the owner
+     * lookup, including when an existing blocking TUN has just been replaced. */
+    fun available(): Boolean {
         val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
-        ServerSocket(0, 1, loopback).use { server ->
-            Socket(loopback, server.localPort).use { client ->
+        return ServerSocket(0, 1, loopback).use { server ->
+            Socket(loopback, server.localPort).use {
                 server.accept().use { accepted ->
-                    owned(accepted.remoteSocketAddress as InetSocketAddress, accepted.localSocketAddress as InetSocketAddress)
+                    availability.available {
+                        owned(accepted.remoteSocketAddress as InetSocketAddress, accepted.localSocketAddress as InetSocketAddress)
+                    }
                 }
             }
         }
-    }.getOrDefault(false)
+    }
+
+    companion object {
+        private val availability = LoopbackOwnerProbe()
+    }
 }
