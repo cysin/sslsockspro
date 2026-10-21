@@ -14,6 +14,8 @@ import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.PackageImporter
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ConnectionStage
+import io.github.cysin.sslsockspro.model.DnsMode
+import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.network.TunneledDns
 import io.github.cysin.sslsockspro.service.ConnectionService
 import io.github.cysin.sslsockspro.service.TunnelState
@@ -111,6 +113,96 @@ class DeviceTunnelTest {
             }
         } else instrumentation.runOnMainSync { ConnectionService.stop(context) }
         awaitDisconnected()
+    }
+
+    /** Ports from `savedProfilePorts`, for example "33009,33008". */
+    private fun savedPorts(): List<Int> = InstrumentationRegistry.getArguments().getString("savedProfilePorts")
+        ?.split(',')?.mapNotNull { it.trim().toIntOrNull() }.orEmpty()
+
+    /** Saved profiles with a stunnel section listening on each port, prepared
+     * to use that section for all apps. The store is not changed here. */
+    private fun savedProfiles(ports: List<Int>): List<TunnelProfile> {
+        val profiles = store.read().profiles
+        return ports.mapNotNull { port ->
+            profiles.firstNotNullOfOrNull { profile ->
+                runCatching {
+                    val document = StunnelDocument.parse(profile.config)
+                    document.sections.firstOrNull { document.listener(it).port == port }
+                        ?.let { profile.copy(selectedSection = it, includedApps = emptyList()) }
+                }.getOrNull()
+            }
+        }
+    }
+
+    private fun vpnNetwork(): android.net.Network {
+        val manager = context.getSystemService(ConnectivityManager::class.java)
+        return manager.allNetworks.first { manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+    }
+
+    private fun https(url: String) {
+        val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).connectTimeout(20, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS).build()
+        try {
+            client.newCall(Request.Builder().url(url).head().build()).execute().use { assertTrue("HTTP ${it.code}", it.code < 500) }
+        } finally { client.connectionPool.evictAll(); client.dispatcher.executorService.shutdown() }
+    }
+
+    /** Opt-in live checks with profiles already saved on the phone, selected by
+     * a tunnel's local port. Saved profiles and settings are restored. */
+    @Test fun savedProfileLiveChecks() {
+        val ports = savedPorts()
+        assumeTrue("Pass --saved-profile-ports to tools/device_test.py", ports.isNotEmpty())
+        val profiles = savedProfiles(ports)
+        assertEquals("Every requested port must belong to a saved stunnel profile", ports.size, profiles.size)
+        val url = InstrumentationRegistry.getArguments().getString("benchmarkUrl") ?: "https://cloudflare-dns.com/cdn-cgi/trace"
+        val original = store.read()
+        store.settings(original.settings.copy(reconnect = false))
+        try {
+            for ((port, saved) in ports.zip(profiles)) {
+                // Local proxy mode: the configured listener serves apps.
+                start(saved.copy(mode = ConnectionMode.LOCAL_PROXY))
+                await { TunnelState.status.value.stage == ConnectionStage.LISTENING }
+                Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 2000) }
+                stop()
+                permission()
+                for (dnsMode in DnsMode.entries) {
+                    start(saved.copy(mode = ConnectionMode.PROXY_VPN, dnsMode = dnsMode))
+                    await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+                    // VPN modes move the selected tunnel to a private internal port.
+                    assertThrows("Port $port must not listen in VPN mode", java.io.IOException::class.java) {
+                        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 1000) }
+                    }
+                    val addresses = vpnNetwork().getAllByName("example.org")
+                    assertTrue(addresses.isNotEmpty())
+                    if (dnsMode == DnsMode.PROXY) assertTrue("Proxy-side resolution answers with placeholders: ${addresses.toList()}",
+                        addresses.all { it.hostAddress!!.startsWith("198.18.") || it.hostAddress!!.startsWith("fd00:5353:1:") })
+                    assertTrue(InetAddress.getAllByName("example.net").isNotEmpty())
+                    https(url)
+                    if (!saved.proxyIpv6) assertThrows(java.io.IOException::class.java) {
+                        Socket().use { it.connect(InetSocketAddress(InetAddress.getByName("2606:4700:4700::1111"), 443), 1500) }
+                    }
+                    TunnelState.requestTest()
+                    await(30000) { TunnelState.testResult.value?.startsWith("Tunnel DNS round trip") == true }
+                    stop(fromUi = true)
+                }
+            }
+            // Worker death keeps the blocking TUN; a new connection recovers.
+            val first = profiles.first().copy(mode = ConnectionMode.PROXY_VPN, dnsMode = DnsMode.DOH)
+            start(first)
+            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            val worker = context.getSystemService(ActivityManager::class.java).runningAppProcesses
+                .first { it.processName == context.packageName + ":engine" }
+            Process.killProcess(worker.pid)
+            await(10000) { TunnelState.status.value.stage == ConnectionStage.ERROR }
+            assertTrue("Owner must retain a blocking TUN after worker death", TunnelState.status.value.vpnActive)
+            assertThrows(java.io.IOException::class.java) { Socket().use { it.connect(InetSocketAddress("1.1.1.1", 443), 2000) } }
+            start(first)
+            await(60000) { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+            https(url)
+            stop(fromUi = true)
+        } finally {
+            if (TunnelState.status.value.running) runCatching { stop() }
+            store.write(original)
+        }
     }
 
     @Test fun savedProfileDisconnectReleasesSystemVpn() {
@@ -226,11 +318,14 @@ class DeviceTunnelTest {
         val arguments = InstrumentationRegistry.getArguments()
         val name = arguments.getString("clientFixture")
         val url = arguments.getString("benchmarkUrl")
-        assumeTrue("Provide clientFixture and benchmarkUrl with tools/device_test.py", name != null && url != null)
-        val bytes = readTestFixture(name!!)
-        val profile = PackageImporter.profiles(PackageImporter.entries(bytes, "client.zip")).single()
-            .copy(name = "Phone benchmark", mode = ConnectionMode.PROXY_VPN, includedApps = emptyList())
-        bytes.fill(0)
+        val saved = savedProfiles(savedPorts())
+        assumeTrue("Provide benchmarkUrl and either clientFixture or savedProfilePorts", url != null && (name != null || saved.isNotEmpty()))
+        val source = if (name != null) {
+            val bytes = readTestFixture(name)
+            PackageImporter.profiles(PackageImporter.entries(bytes, "client.zip")).single().copy(name = "Phone benchmark")
+                .also { bytes.fill(0) }
+        } else saved.first()
+        val profile = source.copy(mode = ConnectionMode.PROXY_VPN, includedApps = emptyList())
         val original = store.read()
         store.settings(original.settings.copy(reconnect = false))
         try {

@@ -373,7 +373,10 @@ It needs no root, host TUN interface, routes, or persistent service. After the
 run, the script fails if the fixture server received a hardware address, kernel
 version or user variables from the client.
 
-Add `--benchmark-url https://...` with a client package to measure DNS latency,
+Add `--saved-profile-ports 33009,33008` to run live checks with profiles already
+saved on the phone, selected by a tunnel's local port; they are restored
+afterwards. Add `--benchmark-url https://...` with a client package or saved
+profile ports to measure DNS latency,
 connection setup (sequential and 32 in parallel) and download throughput through
 the proxy VPN; the result is saved under `.tools/benchmark-*.json`.
 

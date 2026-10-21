@@ -2,6 +2,174 @@
 
 Read README.md and VALIDATION.md before changing this application.
 
+## Current task: real-phone validation of `privacy-performance-hardening`
+
+Branch `privacy-performance-hardening` (pushed to `origin`) holds eight commits
+after `aa462be` (see `git log aa462be..HEAD`): CI and dependency verification,
+robustness fixes, the `TunnelController` state machine and split storage,
+privacy hardening, the non-blocking relay and DNS work, quick controls and
+OpenVPN challenges, native hardening with Keystore OpenVPN keys, and docs.
+Everything passed host checks (85 JVM tests, release lint, all builds; see
+VALIDATION.md), but **nothing has run on a phone yet**. Your job is to validate it
+on the user's connected Android 16 ARM64 phone, fix what fails, and record the
+results. The phone holds the user's real profiles; the user asked to test with
+the saved profiles whose stunnel tunnels listen on local ports **33009** and
+**33008**.
+
+Ground rules: do not change production servers, Android Private DNS, Wi-Fi,
+always-on VPN or lockdown settings; do not reboot, uninstall, `pm clear`, or
+restore backups without the user's explicit agreement; keep phone identifiers,
+server addresses and credentials out of Git and of VALIDATION.md. Commit or push
+only when the user asks (stored credentials: `git -c
+credential.helper="store --file=$HOME/.git-credentials" push`).
+
+### Step 0 — protect the phone's data (blocking)
+
+1. Check the phone and the installed app (`ADB=.tools/android-sdk/platform-tools/adb`):
+   `$ADB devices -l`, `$ADB shell getprop ro.build.version.sdk` (36+),
+   `$ADB shell getprop ro.product.cpu.abi` (arm64-v8a), and the installed signer:
+   `$ADB shell pm path io.github.cysin.sslsockspro`, pull that `base.apk`, then
+   `JAVA_HOME=$PWD/.tools/jdk .tools/android-sdk/build-tools/37.0.0/apksigner verify --print-certs base.apk`.
+2. Signing certificates seen so far (SHA-256):
+   - `2a1fe8cacdd20aceb723c95ed05d22efa34616c4bb138527d0f2df1cbc62ae55`: the old
+     debug key that signed the `*-phone-update.apk` builds in `out/`, which is
+     most likely what the phone runs.
+   - `7d59dfada238c9b44545668b7ed3720120ff96e7651c7b1c5810835e2328ca9b`: the
+     release key (`SSLSOCKSPRO_SIGNING_PROPERTIES`); not on this machine.
+   - `fab032fd0ba68fc72ee9ef5747a67cc90324e42ed997a9ec47c3246a0176dcab`: the
+     debug key that `~/.android/debug.keystore` on this machine (created
+     2026-10-21) puts on every new build.
+   Android updates an app in place only when the certificate matches. **If the
+   phone's signer is not `fab032fd…`, `adb install -r` fails, and uninstalling
+   would destroy the profiles and their Keystore keys.** Then either:
+   - A (preferred): ask the user for the keystore that signed the installed
+     app (old `debug.keystore`, or the release signing properties). Move the
+     current `~/.android/debug.keystore` aside, put the old one in place (or
+     export `SSLSOCKSPRO_SIGNING_PROPERTIES`), and rebuild. The update then keeps
+     all data.
+   - B: only with the user's explicit agreement — the user creates **Settings →
+     Create encrypted local backup** in the installed app and keeps the
+     password; then uninstall, install the new build, and restore that backup
+     (format-1 backups are accepted). Keystore-held keys do not exist in the old
+     version, so nothing else is lost.
+3. The first launch of the new version migrates storage from format 1 to 2
+   (settings move to `settings.enc`); the old version cannot read format 2,
+   so there is no downgrade. Any OpenVPN RSA/EC client key in a profile is also
+   moved into Android Keystore and removed from the profile. Before the first
+   launch, install the debuggable debug build manually
+   (`$ADB install -r app/build/outputs/apk/debug/app-debug.apk`, after Step 1)
+   and copy the sealed files, which stay readable only with this app's Keystore
+   key:
+   `$ADB shell run-as io.github.cysin.sslsockspro sh -c 'mkdir -p files/pre-upgrade && cp -p no_backup/profiles.enc* files/pre-upgrade/'`.
+   Only then run `device_test.py` or open the app. (`device_test.py` installs
+   and starts the tests in one go, so it leaves no point to copy in between.)
+
+### Step 1 — build
+
+```bash
+python3 tools/gradle.py :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleMinifiedDebug
+```
+
+The build sandbox used so far denies loopback UDP (one JVM test skips with a
+message); the Gradle daemon must have network access to resolve dependencies.
+
+### Step 2 — automated phone tests
+
+```bash
+python3 tools/device_test.py --saved-profile-ports 33009,33008 --openvpn-fixture \
+    [--benchmark-url https://<large file chosen by the user>]
+```
+
+This installs the debug and test APKs, then runs `NativeComponentsTest`
+(engines run, are not dumpable), `ProfileStorageTest` (Keystore storage,
+backups, damaged-store handling; it restores the saved profiles), `UiDeviceTest`
+(navigation, rotation; secure fields are platform `EditText`s driven through
+accessibility), `OpenVpnDeviceTest` (disposable host OpenVPN server — direct,
+through stunnel, Keystore-held key via PK_SIGN, IPv6-only, missing DNS) and
+`DeviceTunnelTest`:
+- `savedProfileLiveChecks`: for each port, finds the saved profile whose
+  stunnel section listens there, runs it as a local proxy (listener reachable),
+  then as an all-app proxy VPN with DoH and with proxy-side DNS. It checks that
+  the configured port is not listening in VPN mode, VPN-resolver DNS (placeholder
+  `198.18.x` answers in proxy-side mode), the default resolver, an HTTPS request,
+  IPv6 blocking, and the in-app tunnel test, and finally that a killed worker
+  leaves traffic blocked until reconnect.
+- `savedProfileDisconnectReleasesSystemVpn`: runs only if the selected saved
+  profile is a proxy VPN profile.
+- `benchmarkProxyVpn`: with `--benchmark-url`, measures DNS, connection setup
+  and throughput with the first saved profile.
+Saved profiles and settings are restored after each test. Output:
+`.tools/device-tests.txt`, `.tools/benchmark-*.json`, and the OpenVPN fixture
+logs `.tools/openvpn-fixture-*.log`; the script fails if the fixture server saw
+a hardware address, kernel version or user variables. Host `openvpn` 2.7 and
+`stunnel` are installed. A meaningful before/after benchmark needs the old
+version measured before upgrading; with saved profiles only the new version has
+this test, so report absolute numbers unless the user provides a client package
+for `da870eb`.
+
+### Step 3 — ordinary-UI checks with the optimized build
+
+Install `app/build/outputs/apk/minifiedDebug/app-minifiedDebug.apk` with
+`install -r`. The app sets `FLAG_SECURE`, so `screencap` shows black (that is
+itself check 6); inspect screens with `$ADB shell uiautomator dump` and read
+logs on the Logs screen or via **Save redacted diagnostics**.
+
+1. Profiles 33009/33008 are intact after the migration; selection and settings
+   are preserved.
+2. Phone VPN with each profile: Chrome browsing works and **Test connection**
+   reports a round trip. The status page shows the duration, rates and network
+   type, plus a notice if the backend type was corrected.
+3. Loopback guard: while connected, list loopback listeners
+   (`$ADB shell cat /proc/net/tcp`; 33009 is 0x80F1, 33008 is 0x80F0) and confirm
+   the selected tunnel's port is not listening. Connect from the shell UID to
+   each other app listener (`$ADB shell 'toybox nc -w 2 127.0.0.1 PORT < /dev/null; echo $?'`):
+   the internal stunnel and relay ports must close immediately without data,
+   the relay's 30-second diagnostics line must count "rejected local clients",
+   and the log must not say the platform "cannot attribute loopback
+   connections". (Other sections of a profile intentionally stay open to all
+   local apps.)
+4. Toggle **Resolve names at the proxy server** in a profile; browsing still
+   works.
+5. Handover: switch between Wi-Fi and mobile data while connected. Expect
+   "Network changed; keeping the tunnel and checking it", the status stays
+   Connected and browsing resumes; after a full loss the tunnel reconnects as
+   soon as a network returns.
+6. Privacy surfaces: screenshot black, recents thumbnail hidden, lock-screen
+   notification reads "Tunnel status is hidden on the lock screen", keyboard
+   shows no suggestions in profile fields.
+7. Quick Settings tile toggles (unlock required when locked); launcher shortcuts
+   Connect/Disconnect work. If Android refuses to start the non-exported
+   `ShortcutActivity`, remove the `android.app.shortcuts` meta-data — never
+   export the activity.
+8. Share or open a client package from a file manager: an import confirmation
+   appears; a package signed with `tools/sign_package.py` (use a throwaway key)
+   shows its fingerprint.
+9. Optional, with the user's agreement: boot start of a local proxy profile
+   (needs a reboot) and Disconnect from Android's system VPN dialog.
+
+### Likely failure points and where to look
+
+- Owner check unavailable or rejecting the app itself: `engine/LoopbackOwner.kt`,
+  `ProtectionBroker` `'U'` requests, `protect_connect.c` (`guarded_listener`,
+  `owner_allowed`). Per-app mode deliberately adds this app to the VPN.
+- Stalls with large transfers: MTU 8500 — set `EngineService.PROXY_MTU` to 1500
+  (the owner TUN uses the same constant) and retest.
+- Relay problems: `network/SocksRelay.kt` (reactor states, warm pool); its
+  diagnostics line every 30 s; JVM tests in `SocksRelayTest`.
+- Backend identification: `network/BackendProbe.kt` (results are cached per
+  profile in the worker process).
+- Keystore signing: `data/KeystoreKeys.kt`, `OpenVpnManagement.sign` (errors
+  report "Android Keystore could not sign").
+- APIs newer than API 36 crash on Android 16 (`Process.pid()`, `onExit()`);
+  check `platforms/android-37.2/data/api-versions.xml`.
+
+### Record the results
+
+Replace the "Not yet verified on a phone" list at the top of VALIDATION.md with
+what was actually verified, the benchmark numbers, and every failure or
+limitation (including anything skipped). Run the JVM tests and release lint
+again after any fix.
+
 ## Product boundary
 
 Android 16/API 36 minimum, ARM64 APKs only, English only. The package is

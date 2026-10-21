@@ -20,13 +20,17 @@ def main():
     parser.add_argument('--openvpn-fixture', action='store_true', help='Test a disposable local OpenVPN server through ADB')
     parser.add_argument('--provision-profile', help='After successful live tests, retain an all-app proxy VPN profile with this name')
     parser.add_argument('--benchmark-url', help='HTTPS URL used for the opt-in proxy VPN latency/throughput benchmark')
+    parser.add_argument('--saved-profile-ports', help='Comma-separated local ports (e.g. 33009,33008) of profiles already saved on the phone '
+                        'to run live checks with; saved profiles and settings are restored afterwards')
     parser.add_argument('--test-class', action='append', choices=('NativeComponentsTest', 'ProfileStorageTest', 'DeviceTunnelTest', 'OpenVpnDeviceTest', 'UiDeviceTest'),
                         help='Run selected test classes instead of the complete suite')
     args = parser.parse_args()
     if args.provision_profile and not args.client_package:
         parser.error('--provision-profile requires --client-package')
-    if args.benchmark_url and (not args.client_package or not args.benchmark_url.startswith('https://')):
-        parser.error('--benchmark-url requires --client-package and an https:// URL')
+    if args.saved_profile_ports and not all(part.strip().isdigit() for part in args.saved_profile_ports.split(',')):
+        parser.error('--saved-profile-ports takes comma-separated port numbers')
+    if args.benchmark_url and ((not args.client_package and not args.saved_profile_ports) or not args.benchmark_url.startswith('https://')):
+        parser.error('--benchmark-url requires an https:// URL and --client-package or --saved-profile-ports')
     adb = str(SDK / 'platform-tools/adb')
     result = subprocess.check_output([adb, 'devices'], text=True)
     devices = [line.split()[0] for line in result.splitlines()[1:] if line.endswith('\tdevice')]
@@ -101,7 +105,7 @@ def main():
     try:
         classes = 'io.github.cysin.sslsockspro.NativeComponentsTest'
         classes += ',io.github.cysin.sslsockspro.ProfileStorageTest'
-        if fixture:
+        if fixture or args.saved_profile_ports:
             classes += ',io.github.cysin.sslsockspro.DeviceTunnelTest'
         if openvpn_fixture:
             classes += ',io.github.cysin.sslsockspro.OpenVpnDeviceTest'
@@ -113,8 +117,11 @@ def main():
             command += ['-e', 'clientFixture', fixture]
             if args.provision_profile:
                 command += ['-e', 'provisionProfile', args.provision_profile]
-            if args.benchmark_url:
-                command += ['-e', 'benchmarkUrl', args.benchmark_url]
+        if args.saved_profile_ports:
+            # Also runs the disconnect regression with the selected saved VPN profile.
+            command += ['-e', 'savedProfilePorts', args.saved_profile_ports.replace(' ', ''), '-e', 'savedProfileTest', 'true']
+        if args.benchmark_url:
+            command += ['-e', 'benchmarkUrl', args.benchmark_url]
         if openvpn_fixture:
             command += ['-e', 'openVpnFixture', openvpn_fixture]
         command += ['io.github.cysin.sslsockspro.test/androidx.test.runner.AndroidJUnitRunner']
