@@ -63,7 +63,7 @@ class OpenVpnManagement(
                 }
             }
         } catch (_: Exception) {
-            if (running) runCatching { callback.status("ERROR", "OpenVPN control connection stopped", session) }
+            if (running) runCatching { callback.event(EngineEvent.OPENVPN_CONTROL_LOST, "", session) }
         } finally {
             while (descriptors.isNotEmpty()) runCatching { Os.close(descriptors.removeFirst()) }
         }
@@ -80,9 +80,9 @@ class OpenVpnManagement(
             line.startsWith(">STATE:") -> {
                 val state = line.substringAfter(':').split(',').getOrNull(1)
                 when (state) {
-                    "CONNECTED" -> callback.status("CONNECTED", "OpenVPN connected; traffic is tunneled", session)
-                    "RECONNECTING" -> callback.status("RECONNECTING", "OpenVPN is reconnecting; traffic remains blocked", session)
-                    "EXITING" -> if (running) callback.status("ERROR", "OpenVPN connection ended", session)
+                    "CONNECTED" -> callback.event(EngineEvent.CONNECTED, "", session)
+                    "RECONNECTING" -> callback.event(EngineEvent.RECONNECTING, "", session)
+                    "EXITING" -> if (running) callback.event(EngineEvent.OPENVPN_ENDED, "", session)
                 }
             }
             line.startsWith(">BYTECOUNT:") -> {
@@ -91,7 +91,7 @@ class OpenVpnManagement(
             }
             line.startsWith(">PASSWORD:") -> {
                 if (line.contains("Verification Failed")) {
-                    callback.status("AUTH_ERROR", "OpenVPN authentication was rejected; check the profile credentials", session)
+                    callback.event(EngineEvent.AUTH_REJECTED, "", session)
                     command("signal SIGTERM\n")
                     return
                 }
@@ -100,9 +100,9 @@ class OpenVpnManagement(
                     command("username \"Auth\" ${quoted(profile.openVpnUsername)}\npassword \"Auth\" ${quoted(profile.openVpnPassword)}\n")
                 } else if (name in setOf("Private Key", "PKCS#12") && profile.openVpnKeyPassphrase.isNotBlank()) {
                     command("password ${quoted(name)} ${quoted(profile.openVpnKeyPassphrase)}\n")
-                } else callback.status("AUTH_ERROR", "OpenVPN requires credentials. Add the username/password or key passphrase in the profile editor.", session)
+                } else callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session)
             }
-            line.startsWith(">FATAL:") -> callback.status("CONFIG_ERROR", "OpenVPN could not establish the connection; check configuration and certificates", session)
+            line.startsWith(">FATAL:") -> callback.event(EngineEvent.OPENVPN_FATAL, "", session)
         }
     }
 
@@ -151,6 +151,10 @@ class OpenVpnManagement(
             else -> response = "cancel"
         }
         command("needok '$name' $response\n")
+    }
+
+    fun byteCount(seconds: Int) {
+        if (running) runCatching { command("bytecount $seconds\n") }
     }
 
     @Synchronized private fun command(value: String) {

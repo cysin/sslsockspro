@@ -9,6 +9,11 @@ enum class ConnectionMode { LOCAL_PROXY, PROXY_VPN, OPENVPN }
 @Serializable
 enum class ProxyKind { HTTP_CONNECT, SOCKS5 }
 
+/** DOH sends app DNS as DNS-over-HTTPS through the tunnel. PROXY answers
+ * address queries with synthetic addresses and lets the proxy resolve names. */
+@Serializable
+enum class DnsMode { DOH, PROXY }
+
 @Serializable
 data class TunnelProfile(
     val id: String = UUID.randomUUID().toString(),
@@ -27,6 +32,14 @@ data class TunnelProfile(
     val dnsEndpoint: String = "https://cloudflare-dns.com/dns-query",
     val proxyIpv6: Boolean = false,
     val suppressServiceBindings: Boolean = true,
+    val dnsMode: DnsMode = DnsMode.DOH,
+    /** Optional credentials for the HTTP CONNECT or SOCKS5 backend. */
+    val proxyUsername: String = "",
+    val proxyPassword: String = "",
+    /** Android Keystore alias of a non-exportable OpenVPN client key. */
+    val openVpnKeyAlias: String = "",
+    /** SHA-256 fingerprint of the operator key that signed the imported package. */
+    val operatorKeyFingerprint: String = "",
     val modifiedAt: Long = System.currentTimeMillis(),
 )
 
@@ -51,7 +64,12 @@ data class AppSettings(
     val selectedProfileId: String? = null,
     val reconnect: Boolean = true,
     val darkTheme: Boolean? = null,
+    /** Start the selected local-proxy profile after the phone boots. */
+    val bootStartLocalProxy: Boolean = false,
 )
 
+/** Portable snapshot: profiles and settings. Format 1 predates split storage. */
 @Serializable
-data class Backup(val format: Int = 1, val profiles: List<TunnelProfile>, val settings: AppSettings = AppSettings())
+data class Backup(val format: Int = Backup.FORMAT, val profiles: List<TunnelProfile>, val settings: AppSettings = AppSettings()) {
+    companion object { const val FORMAT = 2 }
+}

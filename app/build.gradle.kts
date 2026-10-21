@@ -91,6 +91,7 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))

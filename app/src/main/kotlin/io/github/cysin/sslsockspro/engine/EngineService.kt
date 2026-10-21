@@ -66,8 +66,8 @@ class EngineService : Service() {
                         runtime.close()
                         if (active === runtime) active = null
                         if (!cancelled) runCatching {
-                            callback.status(if (failure is IllegalArgumentException) "CONFIG_ERROR" else "ERROR",
-                                failure.message ?: "Native engine initialization failed", sessionId)
+                            callback.event(if (failure is IllegalArgumentException) EngineEvent.CONFIG_ERROR else EngineEvent.START_FAILED,
+                                failure.message.orEmpty(), sessionId)
                         }
                     }
                 }
@@ -90,6 +90,14 @@ class EngineService : Service() {
                 executor.submit { }.get(10, TimeUnit.SECONDS)
                 true
             }.getOrDefault(false)
+        }
+        override fun networkChanged(sessionId: String, sameNetwork: Boolean) {
+            check(Binder.getCallingUid() == Process.myUid())
+            active?.takeIf { it.id == sessionId }?.networkChanged(sameNetwork)
+        }
+        override fun setStatsInterval(sessionId: String, milliseconds: Long) {
+            check(Binder.getCallingUid() == Process.myUid())
+            active?.takeIf { it.id == sessionId }?.statsIntervalMs = milliseconds.coerceIn(0, 60_000)
         }
         override fun versions(): String {
             check(Binder.getCallingUid() == Process.myUid())
@@ -128,6 +136,10 @@ class EngineService : Service() {
         private var relay: SocksRelay? = null
         @Volatile private var dns: TunneledDns? = null
         @Volatile private var running = true
+        @Volatile var statsIntervalMs = 1000L
+            set(value) { field = value; applyOpenVpnStats() }
+        private var nextStats = 0L
+        private var lastTraffic = -1L to -1L
         @Volatile private var startingThread: Thread? = null
         private val closed = AtomicBoolean()
         private var watchdog: Job? = null
@@ -173,7 +185,7 @@ class EngineService : Service() {
                 ConnectionMode.LOCAL_PROXY -> {
                     // Generic TCP backends need not speak HTTP or SOCKS. A
                     // listener is ready; remote mTLS is verified on first use.
-                    callback.status("LISTENING", "Local TLS listeners ready. Server TLS is verified when an app connects. Phone-wide routing is off.", id)
+                    callback.event(EngineEvent.LISTENING, "", id)
                 }
                 ConnectionMode.PROXY_VPN -> {
                     val listener = document!!.listener(section(profile, document))
@@ -208,7 +220,7 @@ class EngineService : Service() {
                     if (!hev!!.TProxyStartService(config.absolutePath, tun!!.fd)) {
                         error("Could not start the VPN packet engine")
                     }
-                    callback.status("CONNECTED", "VPN connected: TCP and DNS tunneled; other UDP blocked", id)
+                    callback.event(EngineEvent.CONNECTED, "", id)
                 }
                 ConnectionMode.OPENVPN -> {
                     val managementSocket = File(cacheDir, "ovpn-$id.sock")
@@ -225,6 +237,7 @@ class EngineService : Service() {
                     checkRunning()
                     management = OpenVpnManagement(managementSocket, profile, callback, id)
                     management!!.start()
+                    applyOpenVpnStats()
                 }
             }
             checkRunning()
@@ -233,13 +246,21 @@ class EngineService : Service() {
                     delay(1000)
                     if (!running) break
                     if (stunnel?.isAlive == false || openvpn?.isAlive == false || (hev != null && !hev!!.TProxyIsRunning())) {
-                        runCatching { callback.status("ERROR", "Native network engine stopped; traffic remains blocked", id) }
+                        runCatching { callback.event(EngineEvent.ENGINE_STOPPED, "", id) }
                         break
                     }
-                    relay?.let { runCatching { callback.traffic(it.received.get(), it.sent.get(), id) } }
+                    relay?.let { relay ->
+                        val interval = statsIntervalMs
+                        val traffic = relay.received.get() to relay.sent.get()
+                        if (interval > 0 && System.nanoTime() >= nextStats && traffic != lastTraffic) {
+                            nextStats = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(interval)
+                            lastTraffic = traffic
+                            runCatching { callback.traffic(traffic.first, traffic.second, id) }
+                        }
+                    }
                     try { rotateLog() }
                     catch (_: IOException) {
-                        if (running) runCatching { callback.status("ERROR", "Could not maintain the native diagnostic log", id) }
+                        if (running) runCatching { callback.event(EngineEvent.DIAGNOSTICS_FAILED, "Could not maintain the native diagnostic log", id) }
                         break
                     }
                     readNativeLog()
@@ -256,7 +277,7 @@ class EngineService : Service() {
                             nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
                         } catch (_: Exception) {
                             if (++healthFailures >= HEALTH_FAILURES) {
-                                if (running) runCatching { callback.status("ERROR", "Tunnel health check failed; reconnecting without direct DNS or network fallback", id) }
+                                if (running) runCatching { callback.event(EngineEvent.HEALTH_FAILED, "", id) }
                                 break
                             }
                             log("Tunnel health check failed ($healthFailures/$HEALTH_FAILURES); checking again shortly")
@@ -265,6 +286,12 @@ class EngineService : Service() {
                     }
                 }
             }
+        }
+
+        /** OpenVPN reports its own counters; zero disables them. */
+        private fun applyOpenVpnStats() {
+            val interval = statsIntervalMs
+            management?.byteCount(if (interval <= 0) 0 else maxOf(1, (interval / 1000).toInt()))
         }
 
         private fun section(profile: TunnelProfile, document: StunnelDocument): String =
@@ -301,7 +328,7 @@ class EngineService : Service() {
                 } } catch (_: IOException) {
                     // Android closes process pipes during destroy(). A blocked
                     // diagnostic read must not crash the worker on disconnect.
-                    if (running) runCatching { callback.status("ERROR", "Native diagnostic stream stopped unexpectedly", id) }
+                    if (running) runCatching { callback.event(EngineEvent.DIAGNOSTICS_FAILED, "Native diagnostic stream stopped", id) }
                 }
             }
             return child
@@ -333,7 +360,7 @@ class EngineService : Service() {
 
         private fun log(message: String) {
             if (!message.contains("PRIVATE KEY") && !message.contains("password", true))
-                runCatching { callback.status("LOG", message.take(1024), id) }
+                runCatching { callback.event(EngineEvent.LOG, message.take(1024), id) }
         }
 
         private fun readNativeLog() {
@@ -353,6 +380,14 @@ class EngineService : Service() {
                     lines.dropLast(1).forEach(::nativeLine)
                 }
             }
+        }
+
+        /** Sockets bound to the previous network fail; pooled DoH connections
+         * must not be reused for later queries. */
+        fun networkChanged(sameNetwork: Boolean) {
+            if (!running) return
+            dns?.evictConnections()
+            log(if (sameNetwork) "Network addresses changed" else "Physical network changed")
         }
 
         /** Nonblocking interruption from Binder/UI threads. Resource disposal

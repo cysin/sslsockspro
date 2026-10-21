@@ -82,6 +82,7 @@ class TunneledDns(endpoint: String, proxy: Endpoint, kind: ProxyKind, private va
     }
 
     fun cancelPending() = client.dispatcher.cancelAll()
+    fun evictConnections() = client.connectionPool.evictAll()
 
     companion object {
         fun response(query: Message, code: Int): Message = Message(query.header.id).apply {

@@ -9,10 +9,10 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.LinkProperties
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
@@ -28,53 +28,40 @@ import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.engine.EngineService
 import io.github.cysin.sslsockspro.engine.IEngineCallback
 import io.github.cysin.sslsockspro.engine.IEngineService
+import io.github.cysin.sslsockspro.model.AppSettings
 import io.github.cysin.sslsockspro.model.ConnectionMode
-import io.github.cysin.sslsockspro.model.ConnectionStage
 import io.github.cysin.sslsockspro.model.ConnectionStatus
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.util.UUID
 
 /** The TUN owner contains no third-party native code. Native engine failure
  * leaves the interface open and blocking until recovery or an explicit stop.
+ * Lifecycle decisions live in [TunnelController]; this class performs the
+ * Android operations it requests.
  */
-class ConnectionService : VpnService() {
+class ConnectionService : VpnService(), TunnelPlatform {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val controller = TunnelController(this, scope)
     private val manager by lazy { getSystemService(ConnectivityManager::class.java) }
     private val store get() = (application as TunnelApplication).profiles
-    @Volatile private var profile: TunnelProfile? = null
-    @Volatile private var session = ""
     private var engine: IEngineService? = null
     @Volatile private var tun: ParcelFileDescriptor? = null
     private var bound = false
-    @Volatile private var intentionalStop = false
-    @Volatile private var permissionRevoked = false
     @Volatile private var underlying: Network? = null
-    private var reconnectJob: Job? = null
-    private var startJob: Job? = null
-    private var stopJob: Job? = null
-    private var gateways = "{}"
-    private var retry = 0
     private var registered = false
-    private var networkSignature = 0
-    private var reconnectEnabled = true
-    private var permanentFailure = false
     private val localBinder = object : Binder() { }
     private val callback = object : IEngineCallback.Stub() {
         override fun protectSocket(socket: ParcelFileDescriptor, sessionId: String): Boolean {
             return socket.use {
-                if (sessionId != session || Binder.getCallingUid() != Process.myUid() || intentionalStop) return@use false
+                if (!controller.accepts(sessionId) || Binder.getCallingUid() != Process.myUid()) return@use false
                 try {
-                    if (profile?.mode != ConnectionMode.LOCAL_PROXY && !protect(it.fd)) return@use false
+                    if (controller.profile?.mode != ConnectionMode.LOCAL_PROXY && !protect(it.fd)) return@use false
                     underlying?.bindSocket(it.fileDescriptor)
                     true
                 } catch (_: Exception) { false }
@@ -83,59 +70,36 @@ class ConnectionService : VpnService() {
         override fun acquireTun(networkConfiguration: String, sessionId: String): ParcelFileDescriptor? {
             if (Binder.getCallingUid() != Process.myUid()) return null
             synchronized(this@ConnectionService) {
-                if (sessionId != session || intentionalStop) return null
-                if (profile?.mode == ConnectionMode.OPENVPN) {
+                if (!controller.accepts(sessionId)) return null
+                if (controller.profile?.mode == ConnectionMode.OPENVPN) {
                     val configuration = JSONObject(networkConfiguration)
-                    val address = configuration.optString("ipv4")
                     try {
-                        if (address.isNotBlank() || configuration.optString("ipv6").isNotBlank()) establish(configuration)
+                        if (configuration.optString("ipv4").isNotBlank() || configuration.optString("ipv6").isNotBlank()) establish(configuration)
                     } catch (failure: IllegalArgumentException) {
-                        scope.launch {
-                            if (sessionId == session && !intentionalStop) {
-                                permanentFailure = true
-                                failed(failure.message ?: "OpenVPN network configuration is invalid", retryAllowed = false)
-                            }
-                        }
+                        scope.launch { controller.tunRejected(sessionId, failure.message ?: "OpenVPN network configuration is invalid") }
                         return null
                     }
                 }
                 return tun?.let { ParcelFileDescriptor.dup(it.fileDescriptor) }
             }
         }
-        override fun status(stage: String, message: String, sessionId: String) {
-            if (sessionId != session) return
-            scope.launch {
-                if (sessionId != session || intentionalStop) return@launch
-                if (stage == "LOG") { TunnelState.log(message); return@launch }
-                // Keep the first actionable configuration/authentication
-                // error. Native shutdown can emit generic errors afterward.
-                if (permanentFailure) return@launch
-                val permanent = stage in setOf("AUTH_ERROR", "CONFIG_ERROR")
-                val value = runCatching { ConnectionStage.valueOf(stage) }.getOrDefault(ConnectionStage.ERROR)
-                if (value == ConnectionStage.ERROR) { if (permanent) permanentFailure = true; failed(message, retryAllowed = !permanent) }
-                else {
-                    if (value in setOf(ConnectionStage.CONNECTED, ConnectionStage.LISTENING)) retry = 0
-                    state(value, message)
-                }
-            }
+        override fun event(code: Int, detail: String, sessionId: String) {
+            if (sessionId == controller.session) scope.launch { controller.engineEvent(code, detail, sessionId) }
         }
         override fun traffic(received: Long, sent: Long, sessionId: String) {
-            if (sessionId != session) return
-            scope.launch {
-                if (sessionId == session) TunnelState.status(TunnelState.status.value.copy(bytesReceived = received, bytesSent = sent))
-            }
+            if (sessionId == controller.session) scope.launch { controller.traffic(received, sent, sessionId) }
         }
     }
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             engine = IEngineService.Stub.asInterface(service)
-            if (!intentionalStop && profile != null && TunnelState.status.value.stage == ConnectionStage.CONNECTING) launchEngine()
+            controller.engineConnected()
         }
-        override fun onServiceDisconnected(name: ComponentName) { engine = null; if (!intentionalStop) failed("Native worker stopped. Traffic remains blocked while reconnecting.") }
+        override fun onServiceDisconnected(name: ComponentName) { engine = null; controller.engineDisconnected() }
         override fun onBindingDied(name: ComponentName) {
             engine = null
             if (bound) { runCatching { unbindService(this) }; bound = false }
-            if (!intentionalStop) failed("Native worker exited. Reconnecting without direct fallback.")
+            controller.engineDied()
         }
     }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -145,94 +109,95 @@ class ConnectionService : VpnService() {
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) { networkChanged() }
     }
 
+    private fun networkChanged() { scope.launch { controller.networkChanged() } }
+
     override fun onBind(intent: Intent): IBinder? = if (intent.action == SERVICE_INTERFACE) super.onBind(intent) else localBinder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == STOP) {
-            if (isAlwaysOn) { state(ConnectionStage.ERROR, "Always-on VPN is controlled by Android VPN settings."); return START_STICKY }
-            disconnect(); return START_NOT_STICKY
-        }
+        if (intent?.action == STOP) return if (controller.stop()) START_NOT_STICKY else START_STICKY
         // startForegroundService() requires startForeground() even when this
         // request is dropped while an earlier disconnect is still finishing.
         startForeground(1, notification("Preparing connection"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        if (stopJob?.isActive == true) return START_NOT_STICKY
+        if (controller.stopping) return START_NOT_STICKY
         if (!registered) {
             manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), networkCallback)
             registered = true
         }
-        startJob?.cancel()
-        val requestedId = intent?.getStringExtra(PROFILE)
-        startJob = scope.launch {
-            try {
-                val settings = withContext(Dispatchers.IO) {
-                    val settings = store.read().settings
-                    if (requestedId != null) store.settings(settings.copy(selectedProfileId = requestedId))
-                    settings
-                }
-                reconnectEnabled = settings.reconnect
-                val id = requestedId ?: settings.selectedProfileId
-                require(id != null) { "Import and select a profile first." }
-                connect(id)
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) {
-                state(ConnectionStage.ERROR, failure.message ?: "Could not open encrypted profiles")
-                stopIfUnprotected()
-            }
-        }
+        controller.start(intent?.getStringExtra(PROFILE))
         return START_STICKY
     }
 
-    private suspend fun connect(id: String) {
-        intentionalStop = false
-        permanentFailure = false
-        reconnectJob?.cancel()
-        runCatching { engine?.stop(session) }
-        session = UUID.randomUUID().toString()
-        val requestSession = session
-        try {
-            val selected = withContext(Dispatchers.IO) { store.read().profiles.firstOrNull { it.id == id } ?: error("Profile no longer exists") }
-            if (requestSession != session) return
-            if (profile?.id != selected.id) TunnelState.status(ConnectionStatus(profileId = selected.id))
-            profile = selected
-            state(ConnectionStage.VALIDATING, "Checking configuration and credentials")
-            withContext(Dispatchers.IO) { Credentials.validate(selected) }
-            if (selected.mode == ConnectionMode.LOCAL_PROXY) {
-                check(!isAlwaysOn) { "Turn off Android always-on VPN before using local proxy mode" }
-                synchronized(this) { tun?.close(); tun = null }
-            }
-            underlying = physicalNetwork() ?: error("No Wi-Fi or mobile network is available")
-            networkSignature = signature(underlying)
-            val capabilities = manager.getNetworkCapabilities(underlying!!)
-            check(capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) != true) {
-                "This hotspot needs sign-in. Open Wi-Fi settings, sign in, and reconnect."
-            }
-            if (selected.mode == ConnectionMode.PROXY_VPN) check(manager.getLinkProperties(underlying!!)?.privateDnsServerName.isNullOrBlank()) {
-                "Android Private DNS is set to a strict provider. Choose Automatic or Off in Android Private DNS settings to use the VPN's encrypted DNS. No DNS was sent directly."
-            }
-            setUnderlyingNetworks(arrayOf(underlying!!))
-            gateways = withContext(Dispatchers.IO) { resolveGateways(selected, underlying!!).encode() }
-            if (selected.mode != ConnectionMode.LOCAL_PROXY && prepare(this) != null) error("Approve the Android VPN permission before connecting")
-            if (selected.mode == ConnectionMode.PROXY_VPN) establish(JSONObject())
-            if (selected.mode == ConnectionMode.OPENVPN && tun == null) establish(JSONObject())
-            state(ConnectionStage.CONNECTING, if (selected.mode == ConnectionMode.LOCAL_PROXY) "Starting local TLS listeners" else "Traffic blocked until the tunnel is ready")
-            if (engine == null && !bound) {
-                bound = bindService(Intent(this, EngineService::class.java), connection, Context.BIND_AUTO_CREATE)
-                check(bound) { "Could not start native engine worker" }
-            } else launchEngine()
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) {
-            if (requestSession == session) {
-                state(ConnectionStage.ERROR, failure.message ?: "Connection validation failed")
-                // Configuration/authentication errors require an edit, not an
-                // endless decrypt/validate/retry loop on the phone.
-                stopIfUnprotected()
-            }
-        }
+    override fun onRevoke() {
+        controller.revoked()
+        super.onRevoke()
     }
 
+    override fun onDestroy() {
+        controller.destroyed()
+        if (registered) runCatching { manager.unregisterNetworkCallback(networkCallback) }
+        scope.cancel(); super.onDestroy()
+    }
+
+    // TunnelPlatform
+
+    override val alwaysOn: Boolean get() = isAlwaysOn
+    override val tunOpen: Boolean get() = tun != null
+    override val engineBound: Boolean get() = bound
+    override val engineReady: Boolean get() = engine != null
+    override var status: ConnectionStatus
+        get() = TunnelState.status.value
+        set(value) = TunnelState.status(value)
+
+    override fun now(): Long = System.currentTimeMillis()
+    override fun vpnPermissionMissing(): Boolean = prepare(this) != null
+    override suspend fun settings(): AppSettings = withContext(Dispatchers.IO) { store.settings() }
+    override suspend fun select(profileId: String) = withContext(Dispatchers.IO) {
+        store.settings(store.settings().copy(selectedProfileId = profileId))
+    }
+    override suspend fun profile(id: String): TunnelProfile? = withContext(Dispatchers.IO) { store.profile(id) }
+    override suspend fun validate(profile: TunnelProfile) = withContext(Dispatchers.IO) { Credentials.validate(profile) }
+
+    override fun physicalNetwork(): NetworkSnapshot? {
+        val network = manager.allNetworks.filter {
+            manager.getNetworkCapabilities(it)?.let { caps ->
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            } == true
+        }.sortedWith(compareByDescending<Network> {
+            manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        }.thenByDescending {
+            manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
+        }.thenByDescending {
+            manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }).firstOrNull() ?: return null
+        val capabilities = manager.getNetworkCapabilities(network)
+        val properties = manager.getLinkProperties(network)
+        val captive = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true
+        return NetworkSnapshot(network,
+            listOf(capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED), captive, properties).hashCode(),
+            captivePortal = captive, strictPrivateDns = !properties?.privateDnsServerName.isNullOrBlank())
+    }
+    override fun bindSocketsTo(network: NetworkSnapshot?) { underlying = network?.key as Network? }
+    override fun advertise(network: NetworkSnapshot) { setUnderlyingNetworks(arrayOf(network.key as Network)) }
+    override suspend fun resolveGateways(profile: TunnelProfile, network: NetworkSnapshot): GatewayPlan = withContext(Dispatchers.IO) {
+        val endpoints = mutableListOf<Endpoint>()
+        if (profile.mode != ConnectionMode.OPENVPN || profile.openVpnViaStunnel) {
+            val document = StunnelDocument.parse(profile.config)
+            document.sections.forEach { endpoints += document.remotes(it) }
+        }
+        if (profile.mode == ConnectionMode.OPENVPN && !profile.openVpnViaStunnel) {
+            endpoints += OpenVpnDocument.remotes(profile.openVpnConfig)
+        }
+        GatewayPlan.create(endpoints) { host -> (network.key as Network).getAllByName(host).map { it.hostAddress!! } }
+    }
+
+    override fun establishBlocking(profile: TunnelProfile) = establish(JSONObject())
+    override fun closeTun() { synchronized(this) { tun?.close(); tun = null } }
+
     @Synchronized private fun establish(configuration: JSONObject) {
-        val selected = profile ?: return
+        val selected = controller.profile ?: return
         // A generic session name keeps profile names out of system VPN UI.
         // Unmetered VPNs inherit meteredness from the underlying network.
         val builder = Builder().setSession("SSLSocks Pro").setMtu(configuration.optInt("mtu", 1500).coerceIn(1280, 9000))
@@ -265,89 +230,39 @@ class ConnectionService : VpnService() {
         previous?.close()
     }
 
-    private fun launchEngine() {
-        val selected = profile ?: return
-        val current = session
-        val resolved = gateways
+    override fun bindEngine(): Boolean {
+        bound = bindService(Intent(this, EngineService::class.java), connection, Context.BIND_AUTO_CREATE)
+        return bound
+    }
+    override fun startEngine(profile: TunnelProfile, session: String, gateways: GatewayPlan) {
         val worker = engine ?: return
+        val encoded = gateways.encode()
         scope.launch(Dispatchers.IO) {
-            try { if (current == session && !intentionalStop) worker.start(selected.id, current, resolved, callback) }
-            catch (failure: Exception) { scope.launch(Dispatchers.Main) { if (current == session) failed("Could not communicate with native worker") } }
+            try { if (controller.accepts(session)) worker.start(profile.id, session, encoded, callback) }
+            catch (_: Exception) { scope.launch(Dispatchers.Main) { controller.engineUnreachable(session) } }
         }
     }
-
-    private fun failed(message: String, retryAllowed: Boolean = true) {
-        if (intentionalStop) return
-        if (permanentFailure && retryAllowed) return
-        state(ConnectionStage.ERROR, message)
-        if (!retryAllowed) { reconnectJob?.cancel(); reconnectJob = null }
-        if (!retryAllowed || profile == null || reconnectJob?.isActive == true) return
-        reconnectJob = scope.launch {
-            // The setting read at connection start decides whether to wait;
-            // it is reread once afterward so a change during the wait counts.
-            if (!reconnectEnabled || intentionalStop) { reconnectJob = null; return@launch }
-            val delaySeconds = (1L shl retry.coerceAtMost(5)).coerceAtMost(30)
-            retry++
-            state(ConnectionStage.RECONNECTING, "$message Retrying in $delaySeconds seconds.")
-            delay(delaySeconds * 1000)
-            reconnectJob = null
-            reconnectEnabled = withContext(Dispatchers.IO) { runCatching { store.read().settings.reconnect }.getOrDefault(false) }
-            if (reconnectEnabled && !intentionalStop) profile?.id?.let { connect(it) }
-        }
+    override fun stopEngine(session: String) { runCatching { engine?.stop(session) } }
+    override suspend fun stopEngineAndWait(session: String): Boolean {
+        val worker = engine
+        // The owner stays bound until all earlier worker cleanup has released
+        // its TUN duplicates.
+        return withContext(Dispatchers.IO) { worker == null || runCatching { worker.stopAndWait(session) }.getOrDefault(false) }
+    }
+    override fun unbindEngine() {
+        if (bound) runCatching { unbindService(connection) }
+        bound = false
+        engine = null
+    }
+    override fun engineNetworkChanged(session: String, sameNetwork: Boolean) {
+        runCatching { engine?.networkChanged(session, sameNetwork) }
     }
 
-    private fun networkChanged() {
-        scope.launch {
-            val replacement = physicalNetwork()
-            val changed = signature(replacement)
-            if ((replacement != underlying || changed != networkSignature) && profile != null && !intentionalStop) {
-                underlying = replacement
-                networkSignature = changed
-                if (replacement == null) failed("Network unavailable; protected traffic remains blocked.")
-                else failed("Network changed; rebuilding the encrypted connection.")
-            }
-        }
-    }
-
-    private fun signature(network: Network?): Int = if (network == null) 0 else listOf(
-        manager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
-        manager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL),
-        manager.getLinkProperties(network)).hashCode()
-
-    private fun physicalNetwork(): Network? = manager.allNetworks.filter {
-        manager.getNetworkCapabilities(it)?.let { caps ->
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-        } == true
-    }.sortedWith(compareByDescending<Network> {
-        manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-    }.thenByDescending {
-        manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
-    }.thenByDescending {
-        manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-    }).firstOrNull()
-
-    private fun resolveGateways(selected: TunnelProfile, network: Network): GatewayPlan {
-        val endpoints = mutableListOf<Endpoint>()
-        if (selected.mode != ConnectionMode.OPENVPN || selected.openVpnViaStunnel) {
-            val document = StunnelDocument.parse(selected.config)
-            document.sections.forEach { endpoints += document.remotes(it) }
-        }
-        if (selected.mode == ConnectionMode.OPENVPN && !selected.openVpnViaStunnel) {
-            endpoints += OpenVpnDocument.remotes(selected.openVpnConfig)
-        }
-        return GatewayPlan.create(endpoints) { host -> network.getAllByName(host).map { it.hostAddress!! } }
-    }
-
-    private fun state(stage: ConnectionStage, message: String) {
-        val old = TunnelState.status.value
-        TunnelState.status(old.copy(stage = stage, profileId = profile?.id, message = message,
-            running = profile != null, vpnActive = tun != null, alwaysOn = isAlwaysOn,
-            startedAt = if (old.startedAt == 0L && stage in setOf(ConnectionStage.CONNECTED, ConnectionStage.LISTENING)) System.currentTimeMillis() else old.startedAt))
-        TunnelState.log(message)
+    override fun log(message: String) = TunnelState.log(message)
+    override fun notify(message: String) {
         getSystemService(android.app.NotificationManager::class.java).notify(1, notification(message))
     }
+    override fun stopService() { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
 
     private fun notification(message: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, io.github.cysin.sslsockspro.ui.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -355,63 +270,6 @@ class ConnectionService : VpnService() {
         return Notification.Builder(this, "tunnel").setSmallIcon(R.drawable.ic_tunnel).setContentTitle("SSLSocks Pro")
             .setContentText(message.take(160)).setContentIntent(open).setOngoing(true)
             .apply { if (!isAlwaysOn) addAction(Notification.Action.Builder(null, "Disconnect", stop).build()) }.build()
-    }
-
-    private fun disconnect() {
-        if (stopJob?.isActive == true) return
-        intentionalStop = true
-        startJob?.cancel(); reconnectJob?.cancel()
-        val stoppedSession = session
-        state(ConnectionStage.STOPPING, "Stopping connection")
-        stopJob = scope.launch {
-            val worker = engine
-            val stopped = withContext(Dispatchers.IO) {
-                worker == null || runCatching { worker.stopAndWait(stoppedSession) }.getOrDefault(false)
-            }
-            if (!stopped && engine != null) {
-                state(ConnectionStage.ERROR, "Native worker has not confirmed shutdown. Traffic remains blocked; retry Disconnect.")
-                return@launch
-            }
-            if (bound) { runCatching { unbindService(connection) }; bound = false }
-            engine = null
-            synchronized(this@ConnectionService) { tun?.close(); tun = null }
-            session = ""
-            profile = null
-            TunnelState.status(ConnectionStatus())
-            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
-        }
-    }
-
-    private fun stopIfUnprotected() {
-        if (tun != null) return
-        intentionalStop = true
-        profile = null
-        val old = TunnelState.status.value
-        TunnelState.status(old.copy(running = false, vpnActive = false, alwaysOn = isAlwaysOn))
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
-
-    override fun onRevoke() {
-        // Android has already deactivated this VPN. Its default implementation
-        // stops the service; an async disconnect would be cancelled by teardown.
-        permissionRevoked = true
-        intentionalStop = true
-        super.onRevoke()
-    }
-    override fun onDestroy() {
-        intentionalStop = true
-        runCatching { engine?.stop(session) }
-        if (bound) runCatching { unbindService(connection) }
-        runCatching { tun?.close() }
-        if (registered) runCatching { manager.unregisterNetworkCallback(networkCallback) }
-        val old = TunnelState.status.value
-        // A destroyed owner cannot still be connecting/stopping. Keep an
-        // actionable validation error unless the user explicitly revoked VPN.
-        TunnelState.status(if (old.stage == ConnectionStage.ERROR && !permissionRevoked)
-            old.copy(running = false, vpnActive = false, alwaysOn = false)
-            else ConnectionStatus())
-        scope.cancel(); super.onDestroy()
     }
 
     companion object {
