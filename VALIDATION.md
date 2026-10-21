@@ -1,5 +1,53 @@
 # Validation record
 
+## Privacy, performance and reliability overhaul (2026-10-21)
+
+Branch `privacy-performance-hardening`, eight commits after `aa462be`. Verified on
+the Linux x86-64 build host without a phone:
+
+| Check | Result |
+| --- | --- |
+| JVM tests | 85 run, 0 failures; 1 skipped because this host's sandbox denies loopback UDP (the UDP DNS relay test runs on ordinary hosts and CI) |
+| Release lint | 0 errors; 4 warnings: the existing ChromeOS ABI and Bouncy Castle EST helper warnings, plus Gradle 9.8.2 and kotlinx-serialization 1.12.0 being available (seen now that lint can query repositories) |
+| Builds | debug, debug test, `minifiedDebug` and unsigned release succeed with Gradle dependency verification and lockfiles enforced |
+| Release APK | 8.7 MB (was 15.2 MB); `classes.dex` 2.9 MB (was 9.2 MB, of which 7,455 Bouncy Castle classes were kept) |
+| Native engines | MTE heap-tagging note in both executables, `_FORTIFY_SOURCE` checked calls in all three ELF files, non-executable stacks, 16 KB alignment; stunnel 4.95 MB and OpenVPN 5.55 MB after OpenSSL feature trimming |
+| Signed package interop | A package from `tools/sign_package.py` verifies with the OpenSSL CLI and in the app's verifier (JVM test fixture) |
+| SBOM | 130 components (120 release runtime artifacts, 88 with verified SHA-256, and 10 native sources) |
+
+JVM tests now cover the connection state machine (revocation, worker death,
+permanent errors, unconfirmed shutdown, always-on, debounced network changes,
+soft handover, immediate reconnect when a network returns, captive portals,
+challenges and notices), split storage with format-1 migration and AtomicFile
+recovery, key parsing without JCA providers (RSA, EC, Ed25519, encrypted PEM and
+PBES2 PKCS#8), gateway failover rendering, OpenVPN identity and TLS policy,
+redaction, DoH padding/User-Agent/preemptive relay credentials, the relay
+reactor (pipelined handshakes, SOCKS5 pipelining with credentials, address
+types, synthetic names, the session limit, warm connections and stale-warm
+retry, owner checks), DNS cache/synthetic resolution/backend probing, signed
+manifests, OpenVPN challenge formats and the Keystore key migration rewrite.
+
+**Not yet verified on a phone.** No device was connected during this work. Before
+a release, run `tools/device_test.py` with the client package, the OpenVPN
+fixture and `--benchmark-url`, and the ordinary-UI checks on `minifiedDebug`,
+and record here:
+
+- The loopback owner check: the worker log must not report that the platform
+  cannot attribute loopback connections, and `adb shell` (another UID) must be
+  refused by the internal stunnel and relay ports while the VPN is connected.
+- Proxy VPN with MTU 8500, the non-blocking relay, warm connections, backend
+  identification and proxy-side DNS: browsing, downloads and DNS.
+- Wi-Fi/mobile handover without a full reconnect; reconnection after loss.
+- OpenVPN through a Keystore key (PK_SIGN), the absence of identifying peer
+  information at the fixture server, TLS 1.3 enforcement, and challenges.
+- Non-dumpable native engines (`NativeComponentsTest`).
+- `FLAG_SECURE` (screen capture is black), lock-screen notification text, the
+  Quick Settings tile, launcher shortcuts targeting a non-exported activity, boot
+  start of a local proxy, and opening/sharing packages from another app.
+- Benchmarks compared with a baseline built from commit `da870eb`.
+
+Earlier records below describe the previous implementation.
+
 Baseline recorded on 2026-10-14, with disconnect regressions checked on
 2026-10-15 against the updated source and ARM64 build. Production
 credentials, phone identifiers, and private test logs remain outside Git and the

@@ -25,6 +25,49 @@ def release_version():
     return name, int(code)
 
 
+def sbom(version, epoch):
+    """CycloneDX 1.5 description of what the APK contains: the release runtime
+    classpath with verified artifact digests, and the pinned native sources."""
+    import uuid
+    import xml.etree.ElementTree as ET
+    namespace = {'v': 'https://schema.gradle.org/dependency-verification'}
+    digests = {}
+    tree = ET.parse(ROOT / 'gradle/verification-metadata.xml')
+    for component in tree.getroot().iterfind('.//v:component', namespace):
+        key = (component.get('group'), component.get('name'), component.get('version'))
+        for artifact in component.iterfind('v:artifact', namespace):
+            if artifact.get('name', '').endswith(('.jar', '.aar')):
+                value = artifact.find('v:sha256', namespace)
+                if value is not None:
+                    digests.setdefault(key, []).append({'alg': 'SHA-256', 'content': value.get('value')})
+    components = []
+    for line in (ROOT / 'app/gradle.lockfile').read_text().splitlines():
+        if '=' not in line or line.startswith('#'):
+            continue
+        coordinate, configurations = line.split('=', 1)
+        if 'releaseRuntimeClasspath' not in configurations.split(','):
+            continue
+        group, name, revision = coordinate.split(':')
+        entry = {'type': 'library', 'group': group, 'name': name, 'version': revision,
+                 'purl': 'pkg:maven/' + group + '/' + name + '@' + revision}
+        if (group, name, revision) in digests:
+            entry['hashes'] = digests[(group, name, revision)]
+        components.append(entry)
+    for name, specification in sorted(json.loads((ROOT / 'native-dependencies.json').read_text()).items()):
+        components.append({'type': 'library', 'name': name, 'version': specification['version'],
+                           'hashes': [{'alg': 'SHA-256', 'content': specification['sha256']}],
+                           'externalReferences': [{'type': 'distribution', 'url': specification['url']}]})
+    import datetime
+    return {
+        'bomFormat': 'CycloneDX', 'specVersion': '1.5', 'version': 1,
+        'serialNumber': 'urn:uuid:' + str(uuid.uuid5(uuid.NAMESPACE_URL, 'io.github.cysin.sslsockspro/' + version)),
+        'metadata': {'timestamp': datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                     'component': {'type': 'application', 'name': 'SSLSocks Pro', 'version': version,
+                                   'purl': 'pkg:android/io.github.cysin.sslsockspro@' + version}},
+        'components': components,
+    }
+
+
 def apk_version(apk):
     aapt2 = sorted((SDK / 'build-tools').glob('*/aapt2'))
     if not aapt2:
@@ -89,8 +132,10 @@ def main():
         for specification in manifest.values():
             path = fetch(specification['url'], specification['filename'], specification['sha256'])
             archive.add(path, arcname='sslsockspro/upstream/' + path.name, recursive=False, filter=metadata)
+    bill = output / ('sslsockspro-' + version + '-sbom.cdx.json')
+    bill.write_text(json.dumps(sbom(version, epoch), indent=2, sort_keys=True) + '\n')
     checksums = []
-    for path in (apk, package):
+    for path in (apk, package, bill):
         with path.open('rb') as stream:
             checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
         checksums.append(checksum + '  ' + path.name)

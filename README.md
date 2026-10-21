@@ -2,7 +2,10 @@
 
 An Android 16+ ARM64 client for authenticated stunnel connections and built-in
 OpenVPN. The Material 3 app keeps profiles and credentials in encrypted private
-storage and runs native network engines in a separate worker process.
+storage and runs native network engines in a separate worker process. It is
+designed so that routed traffic never falls back to a direct connection and so
+that the app itself reveals no device identifiers, location or account data.
+See [Privacy protections](#privacy-protections) for exact guarantees and limits.
 
 Application ID: `io.github.cysin.sslsockspro`. Android 16 (API 36) is the minimum.
 The APK contains only `arm64-v8a` code. Native ELF files support 16 KB page
@@ -13,7 +16,7 @@ alignment; actual-device checks are described in [VALIDATION.md](VALIDATION.md).
 | Mode | Behavior | Required server |
 | --- | --- | --- |
 | Local proxy | Starts loopback TCP listeners. Apps must explicitly use a listener. Generic TCP tunnels such as SSH are supported. | stunnel forwarding to the corresponding TCP service |
-| Phone VPN through stunnel | Routes all apps, or selected apps, through one tunnel. TCP and DNS are supported. Other UDP, including QUIC, is blocked. | stunnel forwarding to HTTP CONNECT or SOCKS5 |
+| Phone VPN through stunnel | Routes all apps, or selected apps, through one tunnel. TCP and DNS are supported. Other UDP, including QUIC, is blocked. | stunnel forwarding to HTTP CONNECT or SOCKS5 (identified when connecting) |
 | Built-in OpenVPN | Runs the embedded client with an `.ovpn` profile. Supports TCP/UDP and IPv4/IPv6 inside the authenticated VPN. Can carry OpenVPN TCP through a stunnel HTTP/SOCKS proxy. | An OpenVPN server; a proxy alone is insufficient |
 
 In local mode, **Local proxy ready** means the listeners started. Remote TLS is
@@ -24,16 +27,23 @@ network or DNS fallback.
 ## Start using the app
 
 1. Install the signed ARM64 APK on an Android 16+ phone.
-2. Open **Profiles** and use the import button. Select a ZIP/TAR/TAR.GZ client
-   package, or select the stunnel `.conf` and companion credential files.
+2. Open **Profiles** and use the import button, or open/share the package from
+   another app. Select a ZIP/TAR/TAR.GZ client package, or the stunnel `.conf`
+   and companion credential files. The import dialog shows the operator key
+   fingerprint of a [signed package](#signed-client-packages); compare it with
+   the fingerprint your operator gave you separately. Nothing is saved until you
+   confirm.
 3. Edit the profile. Check the server address/port, local port, certificate name,
-   and backend type. Typical deployment ports are remote `9983` for HTTP CONNECT
-   and `9984` for SOCKS5; `33009` is a local listener.
+   and backend type. The app asks the server whether it is HTTP CONNECT or SOCKS5
+   when connecting and uses the answer. Prefer a numeric server address: a name
+   is looked up on the current network before the tunnel starts.
 4. Choose **Phone VPN through stunnel** for phone-wide routing. Leave app
    selection empty to route all apps, or choose a specific list. Leave **Enable
    IPv6 destinations** off for an IPv4-only proxy server.
 5. Select the profile on **Status** and tap **Connect**. Notification
-   permission and Android VPN consent are requested separately.
+   permission and Android VPN consent are requested separately. Afterwards the
+   Quick Settings tile and launcher shortcuts can connect and disconnect; they
+   show only the connection state and require an unlocked phone.
 6. Check status and **Logs**. Disconnect before editing an active profile or
    restoring a backup. The button shows **Disconnecting…** until the native
    worker releases its VPN descriptors. A shutdown timeout keeps traffic
@@ -48,8 +58,16 @@ the app does not read `/etc/stunnel` or arbitrary phone files.
 
 For an encrypted PEM key, attach the file, choose **Unlock key**, and save the
 profile. The unlocked representation stays encrypted at rest. OpenVPN also has
-username/password and private-key/PKCS#12 passphrase fields. Interactive OTP and
-web authentication flows are not supported.
+username/password and private-key/PKCS#12 passphrase fields, and answers static
+(`static-challenge`) and dynamic (CRV1) one-time-code challenges in the app.
+Web-based single sign-on is not supported.
+
+RSA and EC OpenVPN client keys move into Android Keystore (StrongBox for P-256
+keys when available) when a profile is saved or imported. From then on no one,
+including this app, can read the key; OpenVPN asks the app to sign through its
+management interface. Such keys are not part of backups: keep the original client
+package to set up another phone. Ed25519 keys and stunnel keys stay in encrypted
+app storage because stunnel cannot use Keystore keys.
 
 ## stunnel configuration
 
@@ -76,6 +94,9 @@ socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 socket = l:SO_KEEPALIVE=1
 socket = r:SO_KEEPALIVE=1
+socket = r:TCP_KEEPIDLE=300
+socket = r:TCP_KEEPINTVL=30
+socket = r:TCP_KEEPCNT=4
 
 [proxy]
 accept = 127.0.0.1:33009
@@ -93,8 +114,12 @@ and a matching client certificate/key. It rejects executable hooks, external
 configuration files, provider loading, environment overrides, legacy `verify`
 overrides, unsafe TLS versions, and ancillary network services.
 
-Multiple stunnel sections can run together. A proxy VPN uses the selected
-section; other listeners remain local TCP tunnels.
+Multiple stunnel sections can run together. In the VPN modes the selected
+section listens on a private per-connection loopback port instead of its
+configured `accept` port: only the app's own authenticated relay may connect,
+and the worker checks with Android that every client belongs to this app. Other
+sections remain local TCP tunnels that any app on the phone can use, as in local
+proxy mode.
 
 For OpenVPN through an HTTP/SOCKS tunnel, the proxy must permit the OpenVPN
 server's TCP destination port. A strict HTTPS-only exit commonly permits 443;
@@ -119,8 +144,20 @@ It does not inherit the phone's DNS servers.
 
 Proxy VPN DNS uses DNS-over-HTTPS through the selected stunnel proxy. The default
 endpoint is `https://cloudflare-dns.com/dns-query`; another HTTPS endpoint can be
-configured per profile. Its operator receives queries from the proxy exit.
-There is no fallback to phone DNS, ordinary DNS, or another provider.
+configured per profile. Its operator receives queries from the proxy exit, not
+from the phone. Queries are padded to 128-byte blocks and carry no software
+identifier. There is no fallback to phone DNS, ordinary DNS, or another provider.
+
+**Resolve names at the proxy server** (per profile) keeps lookups away from any
+DNS-over-HTTPS provider: apps receive placeholder addresses
+(`198.18.128.0/17`, `fd00:5353:1::/64`) and the relay sends the original name to
+your proxy, which resolves it. Mail, service and text records still use
+DNS-over-HTTPS through the tunnel. Placeholders survive reconnects of the same
+profile and are forgotten on disconnect.
+
+Answers are cached for their time-to-live (at most one hour; failures at most 30
+seconds) until disconnect. While IPv6 is off, address lookups for IPv6 are
+answered locally with no data instead of being sent anywhere.
 
 UDP and TCP DNS are supported. Identifying EDNS options such as client subnet
 are stripped, and upstream transaction IDs are neutralized. SVCB/HTTPS records
@@ -150,8 +187,14 @@ The Java/Kotlin VPN owner retains the TUN interface if the native worker crashes
 or a connection fails, blocking routed traffic during recovery. Native children
 terminate with their worker, and stale runtime credentials are removed before
 startup. Configuration/authentication failures require an edit; network failures
-use bounded backoff. Proxy VPN health checks run through the tunnel every
-30 seconds. Socket-protection failure never opens a direct route.
+use bounded backoff, and a network that returns after a loss reconnects at once.
+A change between Wi-Fi and mobile data keeps the tunnel: new gateway connections
+use the new network, OpenVPN floats or reconnects internally, and the tunnel is
+checked; only a failed check rebuilds it. Proxy VPN health checks run through
+the tunnel every 30 seconds while the screen is on and every 5 minutes while it
+is off, and are skipped when recent traffic already proved the tunnel. Three
+consecutive failures trigger a reconnect. Socket-protection failure never opens
+a direct route.
 
 Process separation contains native crashes; it is not a security boundary
 between this app's components. System lockdown is needed when the owner process,
@@ -170,31 +213,83 @@ blocks a family when no address, route, or DNS server of that family is added.
 For captive Wi-Fi, use the Wi-Fi settings action and finish hotspot sign-in
 before connecting. The app does not bypass a blocking VPN automatically.
 
+## Privacy protections
+
+What the app does:
+
+- Routed traffic and DNS never fall back to a direct connection. Unassigned
+  address families stay blocked. The app adds no exclusions or split routes;
+  OpenVPN always routes all traffic of covered apps.
+- No telemetry, analytics, crash upload, cloud sync, location, phone-state or
+  package-inventory permission. The app reads only network capabilities, never
+  Wi-Fi names.
+- OpenVPN sends no hardware address, kernel version or custom peer variables.
+  Without `tls-crypt`, OpenVPN must use TLS 1.3 so the client certificate is
+  encrypted on the network; stunnel always requires TLS 1.3.
+- Internal proxy endpoints accept only this app's own connections. Native
+  engines cannot be read by other processes of the app user.
+- Logs and status text omit IP addresses, hardware addresses, certificate
+  names, email addresses, private paths and gateway names.
+- The app screens cannot be captured or shown in the recent-apps preview; the
+  lock screen shows only that a tunnel exists. Text fields ask keyboards not to
+  learn or suggest and are excluded from autofill.
+
+What it cannot do: your server and its proxy see your real IP address and your
+client certificate. A gateway *name* is looked up on the current network before
+connecting; a numeric address avoids that. The DNS-over-HTTPS provider (unless
+names are resolved at the proxy) and the sites you visit see the proxy's
+address. Apps that are not selected for the VPN, other local tunnels, and data
+apps send about you are outside the tunnel's control. Use Android's always-on VPN
+with **Block connections without VPN** to protect traffic while the app is not
+running.
+
+## Signed client packages
+
+Operators can sign client packages so users can check their origin. The app
+verifies an Ed25519 signature over `ssp-manifest.json`, which lists every file's
+SHA-256 and can declare the profile name, mode, backend, tunnel section and DNS
+mode. The import dialog shows the operator key fingerprint; a modified, extra or
+missing file is rejected. Unsigned packages are labelled as such, and a
+`SHA256SUMS` file, when present, must list every file.
+
+```bash
+python3 tools/sign_package.py --generate-key ~/private/operator-ed25519.pem
+python3 tools/sign_package.py --key ~/private/operator-ed25519.pem \
+    --output client-signed.zip --backend SOCKS5 client.conf client.pem server-ca.crt
+```
+
+Publish the printed fingerprint through a different channel than the package.
+
 ## Private data and backups
 
 Profiles, keys, and saved credentials use Android Keystore AES-256-GCM in private,
-non-backup storage. A cross-process lock and atomic snapshot protect reads/edits.
-Android/cloud backups are disabled. Private runtime PEM files are removed when
-the connection stops. Uninstalling removes app data and its Keystore key.
+non-backup storage; settings have their own snapshot so changing them never
+rewrites credentials. A cross-process lock and atomic snapshot protect
+reads/edits. Android/cloud backups are disabled. Private runtime PEM files are
+removed when the connection stops. Uninstalling removes app data and its
+Keystore keys.
 
 Create a local backup in **Settings** before uninstalling or moving phones.
 Portable backups use AES-256-GCM and PBKDF2-HMAC-SHA256 with 600,000 rounds,
 random salt/nonce, and a password of at least 12 characters. Wrong passwords and
 damaged backups do not replace saved profiles. Keep the password separately.
+OpenVPN keys held in Android Keystore are never included. Backups from older
+versions restore; a backup from a newer version is refused.
 
 Import limits are 16 MiB expanded data, 4 MiB per file, and 128 entries. Traversal,
 TAR links/special files, and ambiguous credential basenames are rejected.
 Storage allows 128 profiles and a 32 MiB authenticated snapshot.
 
-Logs are bounded in memory, exclude packet payloads, and redact
-credential-related messages and private paths. **Save redacted diagnostics**
-creates a manual local export. It may include server addresses and public
-certificate metadata; review before sharing. No telemetry, cloud sync,
-automatic crash upload, or location permission is used.
+Logs are bounded in memory, exclude packet payloads, and are redacted when
+written (see above). **Save redacted diagnostics** creates a manual local export;
+review it before sharing. Native output is rate-limited and summarized instead of
+truncated.
 
-Aggregate DNS and connection-worker counters help diagnose load without recording
-queried domains. Outbound proxy handshakes have their own bounded worker pool so
-slow destinations cannot occupy the workers that set up DNS relay connections.
+Aggregate DNS and connection counters help diagnose load without recording
+queried domains. One non-blocking relay performs local and proxy handshakes and
+transfers for up to 1024 connections; idle streams yield near that limit. While
+the screen is on and traffic is recent, it keeps two pre-established tunnel
+connections to save the TLS handshake for the next request.
 
 ## Build
 
@@ -210,7 +305,9 @@ python3 tools/gradle.py :app:testDebugUnitTest :app:assembleDebug
 ```
 
 `preBuild` builds every engine from checksum-pinned sources and verifies cached
-artifacts. It cannot silently package a partial native build. Use
+artifacts. Native code is built with `_FORTIFY_SOURCE`, stack clash protection and
+zero-initialized locals; executables request asynchronous MTE heap tagging, and
+OpenSSL omits QUIC, DTLS, SRP, compression and SSLv3. It cannot silently package a partial native build. Use
 `python3 tools/build_native.py --force` to rebuild native code.
 
 The Gradle helper honors an existing unauthenticated HTTP proxy in
@@ -230,7 +327,19 @@ The Gradle helper honors an existing unauthenticated HTTP proxy in
 | Commons Compress / Bouncy Castle | 1.28.0 / 1.86 |
 
 Source URLs/digests are in `native-dependencies.json` and
-`build-dependencies.json`. Java dependencies are pinned in Gradle.
+`build-dependencies.json`. Gradle verifies every downloaded artifact against
+`gradle/verification-metadata.xml` and resolves the versions in the lockfiles.
+After an intentional dependency change, regenerate both with:
+
+```bash
+python3 tools/gradle.py --write-locks --write-verification-metadata sha256 \
+    :app:testDebugUnitTest :app:lintRelease :app:assembleDebug :app:assembleRelease \
+    :app:assembleMinifiedDebug :app:assembleDebugAndroidTest
+```
+
+GitHub Actions (`.github/workflows/ci.yml`, actions pinned to commit SHAs) runs
+the unit tests, release lint and builds. The release version is set in
+`version.properties`.
 
 ### Signed release
 
@@ -260,7 +369,13 @@ python3 tools/device_test.py --client-package /private/path/client.tar.gz --serv
 The optional OpenVPN fixture needs host `openvpn` and `stunnel`. It creates
 disposable certificates, loopback listeners and temporary ADB TCP reverses.
 Its `dev null` server tests authenticated data channels, not Internet forwarding.
-It needs no root, host TUN interface, routes, or persistent service.
+It needs no root, host TUN interface, routes, or persistent service. After the
+run, the script fails if the fixture server received a hardware address, kernel
+version or user variables from the client.
+
+Add `--benchmark-url https://...` with a client package to measure DNS latency,
+connection setup (sequential and 32 in parallel) and download throughput through
+the proxy VPN; the result is saved under `.tools/benchmark-*.json`.
 
 Tests restore saved profiles and settings. Add `--provision-profile NAME` with
 a client package to retain that package as a selected all-app proxy VPN profile
@@ -295,7 +410,8 @@ Build outputs, signing material, test credentials, phone identifiers, and local
 deployment packages do not belong in this repository.
 
 After building the signed release and recording validation, package the APK,
-corresponding application/native source, and SHA-256 checksums:
+corresponding application/native source, a CycloneDX software bill of materials,
+and SHA-256 checksums:
 
 ```bash
 python3 tools/package_release.py
