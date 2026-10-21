@@ -83,12 +83,20 @@ class StunnelDocument private constructor(val lines: List<ConfigLine>) {
     }
 
     /** [resolvedHosts] maps gateway names to addresses in preference order;
-     * every address becomes a `connect` line so stunnel can fail over. */
-    fun renderRuntime(runtimeDirectory: String, credentialPath: (String) -> String, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
+     * every address becomes a `connect` line so stunnel can fail over.
+     * [listeners] replaces the listener of named sections; VPN modes use it
+     * for a private per-session endpoint instead of the configured port. */
+    fun renderRuntime(runtimeDirectory: String, credentialPath: (String) -> String, resolvedHosts: Map<String, List<String>> = emptyMap(),
+                      listeners: Map<String, Endpoint> = emptyMap()): String {
         validate()
+        require(listeners.keys.all { it in sections } && listeners.values.all { it.host == "127.0.0.1" })
         val output = StringBuilder("foreground = yes\nsyslog = no\ndebug = warning\npid = $runtimeDirectory/stunnel.pid\noutput = $runtimeDirectory/stunnel.log\n")
         for (line in lines) {
+            val override = line.section?.let(listeners::get)
             when {
+                line.key == null && override != null && SECTION.matches(line.raw.trim()) ->
+                    output.append(line.raw).append('\n').append("accept = ").append(override).append('\n')
+                line.key == "accept" && override != null -> Unit
                 line.key in MANAGED_OPTIONS || line.key in APP_OPTIONS -> Unit
                 line.key in FILE_OPTIONS -> output.append(line.key).append(" = ").append(credentialPath(line.value.orEmpty())).append('\n')
                 line.key == "connect" -> {

@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import io.github.cysin.sslsockspro.TunnelApplication
+import io.github.cysin.sslsockspro.config.Endpoint
 import io.github.cysin.sslsockspro.config.GatewayPlan
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
@@ -166,18 +167,30 @@ class EngineService : Service() {
             directory.mkdirs()
             val credentialPath = Credentials.materialize(profile, directory)
             val hosts = gateways.hosts
-            broker = ProtectionBroker(callback, id)
-            checkRunning()
             val allowed = gateways.allowed.joinToString(",")
+            // In VPN modes the selected tunnel is internal: a per-session port
+            // that only this app may use, reached only through the relay.
+            val internal = profile.mode == ConnectionMode.PROXY_VPN || (profile.mode == ConnectionMode.OPENVPN && profile.openVpnViaStunnel)
+            val owner = LoopbackOwner(this@EngineService)
+            val guarded = internal && owner.available()
+            if (internal && !guarded) log("This Android build cannot attribute loopback connections; the internal tunnel uses a private random port without an owner check")
+            val ownerCheck: (java.net.InetSocketAddress, java.net.InetSocketAddress) -> Boolean =
+                if (guarded) owner::owned else { _, _ -> true }
+            broker = ProtectionBroker(callback, id, ownerCheck)
+            checkRunning()
             var document: StunnelDocument? = null
+            var upstream: Endpoint? = null
             if (profile.mode != ConnectionMode.OPENVPN || profile.openVpnViaStunnel) {
                 document = StunnelDocument.parse(profile.config)
+                val selected = section(profile, document)
+                if (internal) upstream = Endpoint("127.0.0.1", freeLoopbackPort())
+                val listeners = upstream?.let { mapOf(selected to it) }.orEmpty()
                 val config = File(directory, "stunnel.conf")
-                config.writeText(document.renderRuntime(directory.absolutePath, credentialPath, hosts))
-                stunnel = process("libstunnel_exec.so", config, allowed)
+                config.writeText(document.renderRuntime(directory.absolutePath, credentialPath, hosts, listeners))
+                stunnel = process("libstunnel_exec.so", config, allowed, guardedPorts = if (guarded) listOf(upstream!!.port) else emptyList())
                 checkRunning()
                 for (section in document.sections) {
-                    val listener = document.listener(section)
+                    val listener = listeners[section] ?: document.listener(section)
                     awaitListener(listener.host, listener.port, stunnel!!)
                 }
             }
@@ -188,11 +201,12 @@ class EngineService : Service() {
                     callback.event(EngineEvent.LISTENING, "", id)
                 }
                 ConnectionMode.PROXY_VPN -> {
-                    val listener = document!!.listener(section(profile, document))
-                    dns = TunneledDns(profile.dnsEndpoint, listener, profile.proxyKind, profile.suppressServiceBindings)
+                    relay = SocksRelay(upstream!!, profile.proxyKind, ownerCheck) { query -> dns!!.resolve(query) }
+                    val relayEndpoint = Endpoint("127.0.0.1", relay!!.port)
+                    dns = TunneledDns(profile.dnsEndpoint, relayEndpoint, ProxyKind.HTTP_CONNECT, profile.suppressServiceBindings,
+                        relay!!.username to relay!!.password)
                     probe(dns!!)
                     checkRunning()
-                    relay = SocksRelay(listener, profile.proxyKind, dns!!::resolve)
                     tun = callback.acquireTun("{}", id) ?: error("VPN interface is unavailable")
                     val config = File(directory, "hev.yml")
                     config.writeText("""
@@ -227,8 +241,11 @@ class EngineService : Service() {
                     managementPath = managementSocket
                     managementSocket.delete()
                     val proxy = if (profile.openVpnViaStunnel) {
-                        val listener = document!!.listener(section(profile, document))
-                        (if (profile.proxyKind == ProxyKind.HTTP_CONNECT) "http-proxy" else "socks-proxy") to listener
+                        relay = SocksRelay(upstream!!, profile.proxyKind, ownerCheck) { error("OpenVPN resolves DNS inside its tunnel") }
+                        val authentication = File(directory, "relay-auth")
+                        authentication.writeText(relay!!.username + "\n" + relay!!.password + "\n")
+                        authentication.setReadable(false, false); authentication.setReadable(true, true)
+                        OpenVpnDocument.HttpProxyRoute(Endpoint("127.0.0.1", relay!!.port), authentication.absolutePath)
                     } else null
                     val config = File(directory, "openvpn.conf")
                     val text = OpenVpnDocument.runtime(profile.openVpnConfig, credentialPath, managementSocket.absolutePath, proxy, hosts)
@@ -249,7 +266,8 @@ class EngineService : Service() {
                         runCatching { callback.event(EngineEvent.ENGINE_STOPPED, "", id) }
                         break
                     }
-                    relay?.let { relay ->
+                    // OpenVPN reports its own counters; its relay carries only OpenVPN.
+                    relay?.takeIf { profile.mode == ConnectionMode.PROXY_VPN }?.let { relay ->
                         val interval = statsIntervalMs
                         val traffic = relay.received.get() to relay.sent.get()
                         if (interval > 0 && System.nanoTime() >= nextStats && traffic != lastTraffic) {
@@ -303,7 +321,9 @@ class EngineService : Service() {
             require(answer.header.rcode == 0 && answer.header.getCount(org.xbill.DNS.Section.ANSWER) > 0) { "Tunnel DNS health check failed" }
         }
 
-        private fun process(binary: String, configuration: File, allowed: String): java.lang.Process {
+        private fun freeLoopbackPort(): Int = java.net.ServerSocket(0, 1, java.net.InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))).use { it.localPort }
+
+        private fun process(binary: String, configuration: File, allowed: String, guardedPorts: List<Int> = emptyList()): java.lang.Process {
             val executable = File(applicationInfo.nativeLibraryDir, binary)
             check(executable.canExecute()) { "Native component is missing or not executable: $binary" }
             val builder = ProcessBuilder(executable.absolutePath, if (binary.contains("openvpn")) "--config" else configuration.absolutePath)
@@ -311,6 +331,7 @@ class EngineService : Service() {
             builder.directory(directory).redirectErrorStream(true)
             builder.environment()["SSP_PROTECT_SOCKET"] = broker!!.name
             builder.environment()["SSP_ALLOWED_PEERS"] = allowed
+            if (guardedPorts.isNotEmpty()) builder.environment()["SSP_GUARDED_PORTS"] = guardedPorts.joinToString(",")
             builder.environment()["SSP_PARENT_PID"] = Process.myPid().toString()
             builder.environment()["OPENSSL_CONF"] = "/dev/null"
             val child = builder.start()

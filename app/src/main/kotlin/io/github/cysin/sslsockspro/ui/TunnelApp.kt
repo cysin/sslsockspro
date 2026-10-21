@@ -19,12 +19,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.PackageImporter
+import io.github.cysin.sslsockspro.data.PackageManifest
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.service.ConnectionService
@@ -156,6 +157,22 @@ internal fun TunnelApp() {
                 confirmButton = { TextButton(onClick = { deleteCandidate = null; ui.delete(profile.id) }) { Text("Delete") } },
                 dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } })
         }
+        ui.pendingImport?.let { plan ->
+            val count = plan.profiles.size
+            AlertDialog(onDismissRequest = { ui.pendingImport = null },
+                title = { Text(if (count == 1) "Import ${plan.profiles.single().name}?" else "Import $count profiles?") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val fingerprint = plan.operatorFingerprint
+                    if (fingerprint != null) {
+                        Text("Signed by the operator key with SHA-256 fingerprint:")
+                        Text(PackageManifest.display(fingerprint), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        Text("Compare it with the fingerprint your server operator gave you through another channel.")
+                    } else Text("This package is not signed. Import it only if you received it directly from your server operator.",
+                        color = MaterialTheme.colorScheme.error)
+                } },
+                confirmButton = { TextButton(onClick = ui::confirmImport) { Text("Import") } },
+                dismissButton = { TextButton(onClick = { ui.pendingImport = null }) { Text("Cancel") } })
+        }
         ui.error?.let { message ->
             AlertDialog(onDismissRequest = { ui.error = null }, title = { Text("Action needs attention") }, text = { Text(message) },
                 confirmButton = { TextButton(onClick = { ui.error = null }) { Text("OK") } })
@@ -166,8 +183,7 @@ internal fun TunnelApp() {
                 title = { Text(if (action == "export") "Encrypt backup" else "Unlock backup") },
                 text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Use at least 12 characters. This password protects every profile and private key in the backup.")
-                    OutlinedTextField(ui.password, onValueChange = { ui.password = it }, label = { Text("Backup password") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation())
+                    SecureTextField(ui.password, { ui.password = it }, "Backup password", Modifier.fillMaxWidth(), secret = true)
                 } },
                 confirmButton = { TextButton(enabled = ui.password.length >= 12, onClick = {
                     val characters = ui.password.toCharArray(); ui.password = ""; ui.passwordAction = null

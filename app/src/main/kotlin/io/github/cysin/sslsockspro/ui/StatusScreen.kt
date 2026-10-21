@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.cysin.sslsockspro.data.Gateways
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ConnectionStage
 import io.github.cysin.sslsockspro.model.TunnelProfile
@@ -65,6 +66,9 @@ internal fun StatusScreen(ui: MainViewModel, padding: PaddingValues, onConnect: 
                 ConnectionMode.PROXY_VPN -> "TCP and encrypted DNS use your server. Other UDP, including QUIC, is blocked. No direct fallback."
                 ConnectionMode.OPENVPN -> "An OpenVPN server and a valid .ovpn profile are required. Your stunnel proxy can carry the OpenVPN TCP connection."
             })
+            if (Gateways.lookedUpNames(displayedProfile).isNotEmpty()) Text(
+                "This profile's server name is looked up on your current network before connecting. Use an IP address in the profile to avoid revealing it.",
+                style = MaterialTheme.typography.bodySmall)
             if (displayedProfile.includedApps.isNotEmpty()) Text("Coverage: ${displayedProfile.includedApps.size} selected " +
                 (if (displayedProfile.includedApps.size == 1) "app." else "apps.") + " Android block-without-VPN settings may block other apps.")
             ui.certificates[displayedProfile.id].orEmpty().filter { it.clientIdentity }.minByOrNull { it.expires }?.let { certificate ->

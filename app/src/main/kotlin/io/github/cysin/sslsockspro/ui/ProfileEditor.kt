@@ -4,7 +4,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -13,15 +12,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.github.cysin.sslsockspro.config.Endpoint
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
+import io.github.cysin.sslsockspro.data.Gateways
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ProxyKind
@@ -70,8 +67,7 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                 Column(Modifier.padding(padding).padding(horizontal = 20.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Spacer(Modifier.height(4.dp))
-                    OutlinedTextField(profile.name, { onChange(profile.copy(name = it)) }, label = { Text("Profile name") },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    SecureTextField(profile.name, { onChange(profile.copy(name = it)) }, "Profile name", Modifier.fillMaxWidth())
                     Box {
                         OutlinedButton(onClick = { modeMenu = true }) { Text(modeLabel(profile.mode)) }
                         DropdownMenu(modeMenu, { modeMenu = false }) { ConnectionMode.entries.forEach { mode ->
@@ -83,15 +79,14 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                             Checkbox(profile.openVpnViaStunnel, { onChange(profile.copy(openVpnViaStunnel = it)) }); Text("Carry OpenVPN TCP through stunnel")
                         }
                         Text("Import an .ovpn file and its companion credentials. TAP, scripts, and compression are unsupported.")
-                        OutlinedTextField(profile.openVpnConfig, { onChange(profile.copy(openVpnConfig = it)) },
-                            label = { Text("OpenVPN configuration") }, modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 320.dp),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
-                        OutlinedTextField(profile.openVpnUsername, { onChange(profile.copy(openVpnUsername = it)) },
-                            label = { Text("Username, if required") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
-                        SecretField(profile.openVpnPassword, { onChange(profile.copy(openVpnPassword = it)) }, "Password, if required")
-                        SecretField(profile.openVpnKeyPassphrase, { onChange(profile.copy(openVpnKeyPassphrase = it)) }, "Private key / PKCS#12 passphrase, if required")
+                        SecureTextField(profile.openVpnConfig, { onChange(profile.copy(openVpnConfig = it)) }, "OpenVPN configuration",
+                            Modifier.fillMaxWidth(), singleLine = false, monospace = true, lines = 8)
+                        if (!profile.openVpnViaStunnel && Gateways.lookedUpNames(profile).isNotEmpty()) Text(LOOKUP_WARNING, color = MaterialTheme.colorScheme.error)
+                        SecureTextField(profile.openVpnUsername, { onChange(profile.copy(openVpnUsername = it)) }, "Username, if required", Modifier.fillMaxWidth())
+                        SecureTextField(profile.openVpnPassword, { onChange(profile.copy(openVpnPassword = it)) }, "Password, if required",
+                            Modifier.fillMaxWidth(), secret = true)
+                        SecureTextField(profile.openVpnKeyPassphrase, { onChange(profile.copy(openVpnKeyPassphrase = it)) },
+                            "Private key / PKCS#12 passphrase, if required", Modifier.fillMaxWidth(), secret = true)
                     }
                     if (profile.mode != ConnectionMode.OPENVPN || profile.openVpnViaStunnel) {
                         if (profile.mode != ConnectionMode.LOCAL_PROXY) Box {
@@ -108,15 +103,13 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                             } }
                         }
                         if (document != null && section.isNotEmpty() && !advanced && document.values(section, "connect").size == 1) key(section) {
-                            BasicTunnelFields(document, section) { config -> onChange(profile.copy(config = config)) }
+                            BasicTunnelFields(document, section, profile.mode) { config -> onChange(profile.copy(config = config)) }
                         }
                         if (!advanced && document?.values(section, "connect").orEmpty().size > 1)
                             Text("This tunnel has several failover destinations. Use the advanced editor to change them individually.")
                         TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Show basic server settings" else "Edit advanced stunnel configuration") }
-                        if (advanced) OutlinedTextField(profile.config, { onChange(profile.copy(config = it)) },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp, max = 380.dp),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), label = { Text("stunnel client configuration") })
+                        if (advanced) SecureTextField(profile.config, { onChange(profile.copy(config = it)) }, "stunnel client configuration",
+                            Modifier.fillMaxWidth(), singleLine = false, monospace = true, lines = 10)
                         Text("TLS 1.3, server certificate verification, and a client identity are required. Repeated socket options and additional tunnels are preserved.")
                     }
                     HorizontalDivider()
@@ -154,9 +147,7 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                             Checkbox(profile.proxyIpv6, { onChange(profile.copy(proxyIpv6 = it)) }); Text("Enable IPv6 destinations")
                         }
                         Text("Enable only when the proxy exit can reach IPv6 sites. When disabled, Android blocks IPv6 and apps use IPv4; there is no direct IPv6 fallback.")
-                        OutlinedTextField(profile.dnsEndpoint, { onChange(profile.copy(dnsEndpoint = it)) },
-                            label = { Text("DNS-over-HTTPS endpoint") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Uri))
+                        SecureTextField(profile.dnsEndpoint, { onChange(profile.copy(dnsEndpoint = it)) }, "DNS-over-HTTPS endpoint", Modifier.fillMaxWidth())
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(profile.suppressServiceBindings, { onChange(profile.copy(suppressServiceBindings = it)) }); Text("Suppress DNS SVCB/HTTPS (64/65)")
                         }
@@ -194,7 +185,7 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
         AlertDialog(onDismissRequest = { if (!unlocking) { unlockFile = null; keyPassword = "" } }, title = { Text("Unlock $name") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("The unlocked key will stay encrypted in private app storage. No key is exported.")
-                SecretField(keyPassword, { keyPassword = it }, "Private key passphrase")
+                SecureTextField(keyPassword, { keyPassword = it }, "Private key passphrase", Modifier.fillMaxWidth(), secret = true)
             } }, confirmButton = { TextButton(enabled = !unlocking, onClick = {
                 unlocking = true
                 val password = keyPassword.toCharArray(); keyPassword = ""
@@ -211,34 +202,46 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
     }
 }
 
-@Composable
-private fun SecretField(value: String, change: (String) -> Unit, label: String) {
-    OutlinedTextField(value, change, label = { Text(label) }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-        visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password))
-}
+private const val LOOKUP_WARNING = "The server name is looked up on your current network before each connection, which reveals it to that network. " +
+    "Use an IP address to avoid the lookup; the certificate name still verifies the server."
 
 @Composable
-private fun BasicTunnelFields(document: StunnelDocument, section: String, onChange: (String) -> Unit) {
+private fun BasicTunnelFields(document: StunnelDocument, section: String, mode: ConnectionMode, onChange: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
     val remote = runCatching { document.remotes(section).first() }.getOrDefault(Endpoint("SERVER_IP", 9983))
     val listener = runCatching { document.listener(section) }.getOrDefault(Endpoint("127.0.0.1", 33009))
     var host by remember { mutableStateOf(remote.host) }
     var port by remember { mutableStateOf(remote.port.toString()) }
     var localPort by remember { mutableStateOf(listener.port.toString()) }
     var identity by remember { mutableStateOf(document.effective(section, "checkhost") ?: document.effective(section, "checkip").orEmpty()) }
+    var lookup by remember { mutableStateOf<String?>(null) }
     val identityOption = if (!document.effective(section, "checkhost").isNullOrBlank()) "checkHost" else "checkIP"
     fun endpoint() = if (host.contains(':')) "[$host]:$port" else "$host:$port"
-    OutlinedTextField(host, { host = it; onChange(document.updated(section, "connect", endpoint())) },
-        label = { Text("Server IP or hostname") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Uri))
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedTextField(port, { port = it; onChange(document.updated(section, "connect", endpoint())) },
-            label = { Text("Server port") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-        OutlinedTextField(localPort, { localPort = it; onChange(document.updated(section, "accept",
-            if (listener.host.contains(':')) "[" + listener.host + "]:" + it else listener.host + ":" + it)) },
-            label = { Text("Local port") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+    SecureTextField(host, { host = it; onChange(document.updated(section, "connect", endpoint())) }, "Server IP or hostname", Modifier.fillMaxWidth())
+    if (host.isNotBlank() && !Gateways.isAddressLiteral(host)) {
+        Text(LOOKUP_WARNING, color = MaterialTheme.colorScheme.error)
+        TextButton(onClick = {
+            val name = host
+            scope.launch {
+                // An explicit user action; during a VPN session this lookup is tunneled.
+                lookup = try {
+                    host = withContext(Dispatchers.IO) { java.net.InetAddress.getAllByName(name).first().hostAddress!! }
+                    onChange(document.updated(section, "connect", endpoint()))
+                    null
+                } catch (_: Exception) { "Could not look up $name" }
+            }
+        }) { Text("Use its current IP address") }
+        lookup?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
-    OutlinedTextField(identity, { identity = it; onChange(document.updated(section, identityOption, it)) },
-        label = { Text(if (identityOption == "checkHost") "Server certificate name" else "Server certificate IP") },
-        supportingText = { Text("Must match the server certificate. It can differ from the connection IP.") },
-        singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        SecureTextField(port, { port = it; onChange(document.updated(section, "connect", endpoint())) }, "Server port", Modifier.weight(1f), number = true)
+        SecureTextField(localPort, { localPort = it; onChange(document.updated(section, "accept",
+            if (listener.host.contains(':')) "[" + listener.host + "]:" + it else listener.host + ":" + it)) },
+            "Local port", Modifier.weight(1f), number = true)
+    }
+    if (mode != ConnectionMode.LOCAL_PROXY) Text("VPN modes reach this tunnel through a private per-connection endpoint that only this app can use; the local port applies to Local proxy mode.",
+        style = MaterialTheme.typography.bodySmall)
+    SecureTextField(identity, { identity = it; onChange(document.updated(section, identityOption, it)) },
+        if (identityOption == "checkHost") "Server certificate name" else "Server certificate IP", Modifier.fillMaxWidth(),
+        supportingText = "Must match the server certificate. It can differ from the connection IP.")
 }

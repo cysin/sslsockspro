@@ -193,4 +193,64 @@ class SocksRelayTest {
             }
         }
     }
+
+    @Test(timeout = 15000) fun httpConnectFrontendRequiresRelayCredentials() {
+        SocksRelay(Endpoint("127.0.0.1", 9), ProxyKind.HTTP_CONNECT) { error("DNS was not requested") }.use { relay ->
+            Socket("127.0.0.1", relay.port).use { socket ->
+                socket.soTimeout = 5000
+                socket.getOutputStream().write("CONNECT dns.example:443 HTTP/1.1\r\nHost: dns.example:443\r\n\r\n".toByteArray())
+                val reply = socket.getInputStream().readBytes().toString(Charsets.US_ASCII)
+                assertTrue(reply.startsWith("HTTP/1.1 407 "))
+            }
+        }
+    }
+
+    @Test(timeout = 15000) fun httpConnectFrontendTunnelsThroughTheBackend() {
+        ServerSocket(0, 10, InetAddress.getLoopbackAddress()).use { upstream ->
+            val failure = AtomicReference<Throwable?>()
+            val server = thread {
+                try { upstream.accept().use { socket ->
+                    socket.soTimeout = 5000
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    // SOCKS5 backend: the relay translates the HTTP request.
+                    assertEquals(5, input.readUnsignedByte()); input.readFully(ByteArray(input.readUnsignedByte()))
+                    output.write(byteArrayOf(5, 0)); output.flush()
+                    assertEquals(5, input.readUnsignedByte()); assertEquals(1, input.readUnsignedByte()); input.readUnsignedByte()
+                    assertEquals("vpn.example", SocksRelay.readAddress(input)); assertEquals(443, input.readUnsignedShort())
+                    output.write(byteArrayOf(5, 0, 0, 1, 127, 0, 0, 1, 0, 0)); output.flush()
+                    assertEquals("ping", String(ByteArray(4).also(input::readFully)))
+                    output.write("pong".toByteArray()); output.flush()
+                } } catch (error: Throwable) { failure.set(error) }
+            }
+            SocksRelay(Endpoint("127.0.0.1", upstream.localPort), ProxyKind.SOCKS5) { error("DNS was not requested") }.use { relay ->
+                Socket("127.0.0.1", relay.port).use { socket ->
+                    socket.soTimeout = 5000
+                    val authorization = java.util.Base64.getEncoder().encodeToString("${relay.username}:${relay.password}".toByteArray())
+                    socket.getOutputStream().write(("CONNECT vpn.example:443 HTTP/1.0\r\nProxy-Authorization: Basic $authorization\r\n\r\n").toByteArray())
+                    val input = socket.getInputStream()
+                    val header = StringBuilder()
+                    while (!header.endsWith("\r\n\r\n")) header.append(input.read().toChar())
+                    assertTrue(header.startsWith("HTTP/1.1 200 "))
+                    socket.getOutputStream().write("ping".toByteArray())
+                    assertEquals("pong", String(ByteArray(4).also { DataInputStream(input).readFully(it) }))
+                }
+            }
+            server.join(5000); failure.get()?.let { throw it }
+        }
+    }
+
+    @Test(timeout = 15000) fun connectionsFromOtherAppsAreClosedBeforeAuthentication() {
+        val checked = AtomicInteger()
+        SocksRelay(Endpoint("127.0.0.1", 9), ProxyKind.HTTP_CONNECT, ownerCheck = { peer, local ->
+            checked.incrementAndGet(); assertTrue(peer.address.isLoopbackAddress && local.port > 0); false
+        }) { error("DNS was not requested") }.use { relay ->
+            Socket("127.0.0.1", relay.port).use { socket ->
+                socket.soTimeout = 5000
+                // Closed before any greeting is read or answered.
+                assertEquals(-1, socket.getInputStream().read())
+            }
+            assertEquals(1, checked.get())
+        }
+    }
 }

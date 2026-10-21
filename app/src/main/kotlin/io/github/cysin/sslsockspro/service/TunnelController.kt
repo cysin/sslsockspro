@@ -6,6 +6,7 @@ import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ConnectionStage
 import io.github.cysin.sslsockspro.model.ConnectionStatus
 import io.github.cysin.sslsockspro.model.TunnelProfile
+import io.github.cysin.sslsockspro.privacy.Redactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -249,7 +250,8 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
             old.copy(running = false, vpnActive = false, alwaysOn = false) else ConnectionStatus()
     }
 
-    private fun state(stage: ConnectionStage, message: String) {
+    private fun state(stage: ConnectionStage, detail: String) {
+        val message = Redactor.redactIdentifiers(detail)
         val old = platform.status
         platform.status = old.copy(stage = stage, profileId = profile?.id, message = message,
             running = profile != null, vpnActive = platform.tunOpen, alwaysOn = platform.alwaysOn,

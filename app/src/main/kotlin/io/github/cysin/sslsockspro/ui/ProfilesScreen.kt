@@ -23,6 +23,8 @@ internal fun ProfilesScreen(ui: MainViewModel, padding: PaddingValues, onDelete:
             ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(profile.name, style = MaterialTheme.typography.titleLarge)
                 Text(modeLabel(profile.mode))
+                Text(if (profile.operatorKeyFingerprint.isNotEmpty()) "Signed package · operator ${profile.operatorKeyFingerprint.take(16).chunked(4).joinToString(" ")}"
+                    else "Unsigned or manually created profile", style = MaterialTheme.typography.bodySmall)
                 ui.tunnels[profile.id].orEmpty().forEach { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { ui.select(profile.id) { ui.page = 0 } }) { Text("Select") }

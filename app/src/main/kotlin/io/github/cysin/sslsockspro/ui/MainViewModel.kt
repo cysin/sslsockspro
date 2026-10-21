@@ -12,6 +12,7 @@ import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.CertificateSummary
 import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.PackageImporter
+import io.github.cysin.sslsockspro.data.PackageManifest
 import io.github.cysin.sslsockspro.model.AppSettings
 import io.github.cysin.sslsockspro.model.Backup
 import io.github.cysin.sslsockspro.model.TunnelProfile
@@ -36,6 +37,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var password by mutableStateOf("")
     var pendingRestore by mutableStateOf<ByteArray?>(null)
     var pendingExport by mutableStateOf<ByteArray?>(null)
+    /** Parsed package awaiting the user's confirmation of its origin. */
+    var pendingImport by mutableStateOf<PackageImporter.ImportPlan?>(null)
     /** Per profile ID; recomputed only when that profile changes. */
     var certificates by mutableStateOf<Map<String, List<CertificateSummary>>>(emptyMap()); private set
     var tunnels by mutableStateOf<Map<String, List<String>>>(emptyMap()); private set
@@ -96,7 +99,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun save(profile: TunnelProfile) = perform("Could not save profile") {
-        withContext(Dispatchers.IO) { store.save(profile) }
+        // An edited configuration or credential set is no longer what the operator signed.
+        val stored = backup.profiles.firstOrNull { it.id == profile.id }
+        val signed = stored != null && stored.config == profile.config && stored.openVpnConfig == profile.openVpnConfig && stored.files == profile.files
+        val saved = if (signed) profile else profile.copy(operatorKeyFingerprint = "")
+        withContext(Dispatchers.IO) { store.save(saved) }
         editor = null
         refresh()
     }
@@ -111,14 +118,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (files.isEmpty()) return@perform
         val draft = editor
         if (draft != null) {
-            editor = draft.copy(files = draft.files + files.filterKeys { !it.endsWith(".conf", true) && !it.endsWith(".ovpn", true) }
+            editor = draft.copy(files = draft.files + files.filterKeys {
+                !it.endsWith(".conf", true) && !it.endsWith(".ovpn", true) && it !in PackageManifest.NAMES
+            }
                 .mapValues { Base64.getEncoder().encodeToString(it.value) },
                 openVpnConfig = files.filterKeys { it.endsWith(".ovpn", true) }.values.firstOrNull()?.toString(Charsets.UTF_8) ?: draft.openVpnConfig)
             return@perform
         }
-        val profiles = withContext(Dispatchers.IO) { PackageImporter.profiles(files) }
-        require(profiles.isNotEmpty()) { "Select a client configuration/package, or open a profile to attach credentials" }
-        withContext(Dispatchers.IO) { profiles.forEach(store::save) }
+        val plan = withContext(Dispatchers.IO) { PackageImporter.plan(files) }
+        require(plan.profiles.isNotEmpty()) { "Select a client configuration/package, or open a profile to attach credentials" }
+        pendingImport = plan
+    }
+
+    fun confirmImport() = perform("Could not import files") {
+        val plan = pendingImport ?: return@perform
+        pendingImport = null
+        withContext(Dispatchers.IO) { plan.profiles.forEach(store::save) }
         refresh { page = 1 }
     }
 
@@ -149,7 +164,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         discardPending()
-        password = ""; editor = null
+        password = ""; editor = null; pendingImport = null
         pendingConnect = null; pendingNotification = null
     }
 }

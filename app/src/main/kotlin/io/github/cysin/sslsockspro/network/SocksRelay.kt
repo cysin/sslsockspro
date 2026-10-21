@@ -25,12 +25,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-/** Authenticated local SOCKS frontend. Transfers use one NIO reactor, not one
+/** Authenticated local SOCKS5 and HTTP CONNECT frontend; the only client of
+ * the stunnel listener in VPN modes. Transfers use one NIO reactor, not one
  * thread per stream. Its UDP socket accepts DNS only and never forwards UDP.
+ * [ownerCheck] receives (peer, local) and admits only this app's sockets.
  */
 class SocksRelay(
     private val upstream: Endpoint,
     private val kind: ProxyKind,
+    private val ownerCheck: (InetSocketAddress, InetSocketAddress) -> Boolean = { _, _ -> true },
     private val dns: (ByteArray) -> ByteArray,
 ) : AutoCloseable {
     val username = "vpn"
@@ -57,8 +60,10 @@ class SocksRelay(
     private val dnsResponses = AtomicLong()
     private val dnsFailures = AtomicLong()
     private val unassociatedUdp = AtomicLong()
+    private val rejectedLocalClients = AtomicLong()
+    private val basicAuthorization = "Basic " + java.util.Base64.getEncoder().encodeToString("$username:$password".toByteArray())
     fun diagnostics(): String = "DNS requests=${dnsRequests.get()} replies=${dnsResponses.get()} failures=${dnsFailures.get()}; " +
-        "unassociated UDP=${unassociatedUdp.get()}; connections=${slots.get()} DNS workers=${dnsExecutor.activeCount} queued=${dnsExecutor.queue.size}; " +
+        "unassociated UDP=${unassociatedUdp.get()}; rejected local clients=${rejectedLocalClients.get()}; connections=${slots.get()} DNS workers=${dnsExecutor.activeCount} queued=${dnsExecutor.queue.size}; " +
         "authentication=${handshake.activeCount}/${handshake.queue.size} upstream=${upstreamHandshake.activeCount}/${upstreamHandshake.queue.size}"
 
     private class Session(val left: SocketChannel, val right: SocketChannel) {
@@ -87,6 +92,10 @@ class SocksRelay(
     private fun accept() {
         while (running) {
             val client = try { server.accept() } catch (_: Exception) { break }
+            val owned = runCatching {
+                ownerCheck(client.remoteAddress as InetSocketAddress, client.localAddress as InetSocketAddress)
+            }.getOrDefault(false)
+            if (!owned) { rejectedLocalClients.incrementAndGet(); runCatching { client.close() }; continue }
             if (slots.incrementAndGet() > 128) { slots.decrementAndGet(); client.close(); continue }
             channels.add(client)
             try { handshake.execute { negotiate(client) } }
@@ -100,7 +109,9 @@ class SocksRelay(
             client.socket().soTimeout = 15_000
             val input = DataInputStream(client.socket().getInputStream())
             val output = DataOutputStream(client.socket().getOutputStream())
-            require(input.readUnsignedByte() == 5)
+            val version = input.readUnsignedByte()
+            if (version == 'C'.code) { transferred = negotiateHttp(client, input, output); return }
+            require(version == 5)
             val methods = ByteArray(input.readUnsignedByte()).also(input::readFully)
             if (2.toByte() !in methods) { output.write(byteArrayOf(5, -1)); return }
             output.write(byteArrayOf(5, 2)); output.flush()
@@ -145,7 +156,36 @@ class SocksRelay(
         }
     }
 
-    private fun connectUpstream(client: SocketChannel, target: String, targetPort: Int) {
+    /** HTTP CONNECT for DoH and OpenVPN. Credentials are required on the
+     * first request; a missing or wrong value is answered with 407. */
+    private fun negotiateHttp(client: SocketChannel, input: DataInputStream, output: DataOutputStream): Boolean {
+        val header = java.io.ByteArrayOutputStream().apply { write('C'.code) }
+        var tail = 'C'.code
+        while (tail != 0x0D0A0D0A) {
+            require(header.size() < 8192) { "Oversized CONNECT request" }
+            val value = input.readUnsignedByte()
+            header.write(value); tail = (tail shl 8) or value
+        }
+        val lines = header.toString(Charsets.US_ASCII).split("\r\n")
+        val authority = Regex("CONNECT (\\S+) HTTP/1\\.[01]").matchEntire(lines.first())?.groupValues?.get(1)
+        val credentials = lines.drop(1).firstOrNull { it.startsWith("Proxy-Authorization:", ignoreCase = true) }?.substringAfter(':')?.trim()
+        if (credentials == null || !MessageDigest.isEqual(credentials.toByteArray(), basicAuthorization.toByteArray())) {
+            output.write("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"relay\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .toByteArray(Charsets.US_ASCII))
+            return false
+        }
+        val endpoint = authority?.let { runCatching { Endpoint.parse(it) }.getOrNull() }
+        val host = endpoint?.host?.takeIf { it.none { character -> character.code < 33 || character in "[]/\\" } && it.length in 1..253 }
+        if (endpoint == null || host == null) {
+            output.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+            return false
+        }
+        val target = if (host.contains(':')) InetAddress.getByName(host).hostAddress!! else IDN.toASCII(host, IDN.USE_STD3_ASCII_RULES)
+        upstreamHandshake.execute { connectUpstream(client, target, endpoint.port, http = true) }
+        return true
+    }
+
+    private fun connectUpstream(client: SocketChannel, target: String, targetPort: Int, http: Boolean = false) {
         var remote: SocketChannel? = null
         var transferred = false
         try {
@@ -158,12 +198,16 @@ class SocksRelay(
                 ProxyKind.HTTP_CONNECT -> httpConnect(remote, target, targetPort)
                 ProxyKind.SOCKS5 -> socksConnect(remote, target, targetPort)
             }
-            reply(DataOutputStream(client.socket().getOutputStream()), 0)
+            if (http) client.socket().getOutputStream().write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray(Charsets.US_ASCII))
+            else reply(DataOutputStream(client.socket().getOutputStream()), 0)
             client.socket().soTimeout = 0; remote.socket().soTimeout = 0
             client.configureBlocking(false); remote.configureBlocking(false)
             registrations.add(Session(client, remote)); transferred = true; selector.wakeup()
         } catch (_: Exception) {
-            runCatching { reply(DataOutputStream(client.socket().getOutputStream()), 1) }
+            runCatching {
+                if (http) client.socket().getOutputStream().write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                else reply(DataOutputStream(client.socket().getOutputStream()), 1)
+            }
         } finally {
             if (!transferred) {
                 remote?.let { channels.remove(it); runCatching { it.close() } }

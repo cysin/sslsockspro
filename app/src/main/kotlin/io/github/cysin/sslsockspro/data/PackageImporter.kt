@@ -2,6 +2,7 @@ package io.github.cysin.sslsockspro.data
 
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.model.ConnectionMode
+import io.github.cysin.sslsockspro.model.DnsMode
 import io.github.cysin.sslsockspro.model.ProxyKind
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -9,7 +10,6 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.FilterInputStream
-import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
@@ -90,36 +90,58 @@ object PackageImporter {
             }
             else -> add(filename, bytes)
         }
-        files.remove("SHA256SUMS")?.toString(Charsets.UTF_8)?.lineSequence()?.filter(String::isNotBlank)?.forEach { line ->
-            val match = Regex("^([a-fA-F0-9]{64})  ([^/\\\\]+)$").matchEntire(line) ?: throw IllegalArgumentException("Invalid package checksum manifest")
-            files[match.groupValues[2]]?.let { data ->
-                val hash = MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
-                require(hash.equals(match.groupValues[1], true)) { "Package checksum mismatch" }
+        files.remove("SHA256SUMS")?.toString(Charsets.UTF_8)?.let { sums ->
+            // A checksum list must cover the whole package; an unlisted file
+            // would otherwise be imported without any integrity check.
+            val listed = mutableSetOf<String>()
+            sums.lineSequence().filter(String::isNotBlank).forEach { line ->
+                val match = Regex("^([a-fA-F0-9]{64})  ([^/\\\\]+)$").matchEntire(line) ?: throw IllegalArgumentException("Invalid package checksum manifest")
+                val data = files[match.groupValues[2]] ?: throw IllegalArgumentException("SHA256SUMS lists a missing file: ${match.groupValues[2]}")
+                require(PackageManifest.sha256(data).equals(match.groupValues[1], true)) { "Package checksum mismatch" }
+                listed += match.groupValues[2]
             }
+            (files.keys - PackageManifest.NAMES - listed).firstOrNull()?.let { throw IllegalArgumentException("SHA256SUMS does not list $it") }
         }
         return files
     }
 
-    fun profiles(files: Map<String, ByteArray>): List<TunnelProfile> {
+    /** Profiles in a package and, for a signed package, the operator key's
+     * fingerprint, which the user confirms before anything is saved. */
+    data class ImportPlan(val profiles: List<TunnelProfile>, val operatorFingerprint: String?)
+
+    fun profiles(files: Map<String, ByteArray>): List<TunnelProfile> = plan(files).profiles
+
+    fun plan(all: Map<String, ByteArray>): ImportPlan {
+        val files = all - PackageManifest.NAMES
+        val verified = PackageManifest.verify(files, all[PackageManifest.MANIFEST], all[PackageManifest.SIGNATURE], all[PackageManifest.OPERATOR_KEY])
+        val hints = verified?.manifest?.profiles.orEmpty().associateBy { it.config }
+        val fingerprint = verified?.fingerprint.orEmpty()
         val configs = files.filterKeys { it.endsWith(".conf", true) }
         val vpn = files.filterKeys { it.endsWith(".ovpn", true) }
         val references = (configs.values.flatMap { StunnelDocument.parse(it.toString(Charsets.UTF_8)).credentialReferences() } +
             vpn.values.flatMap { OpenVpnDocument.credentialReferences(it.toString(Charsets.UTF_8)) }).map(Credentials::referenceName).toSet()
         val encoded = files.filterKeys { it in references || it.substringAfterLast('.', "").lowercase() in setOf("pem", "crt", "cer", "der", "key", "p12", "pfx", "crl", "auth", "txt") }
             .mapValues { Base64.getEncoder().encodeToString(it.value) }
-        if (configs.isEmpty()) return vpn.map { (name, bytes) ->
+        val profiles = if (configs.isEmpty()) vpn.map { (name, bytes) ->
             OpenVpnDocument.validate(bytes.toString(Charsets.UTF_8))
-            TunnelProfile(name = name.substringBeforeLast('.'), config = "", mode = ConnectionMode.OPENVPN,
-                openVpnConfig = bytes.toString(Charsets.UTF_8), files = encoded)
-        }
-        return configs.map { (name, bytes) ->
+            TunnelProfile(name = hints[name]?.name ?: name.substringBeforeLast('.'), config = "", mode = ConnectionMode.OPENVPN,
+                openVpnConfig = bytes.toString(Charsets.UTF_8), files = encoded, operatorKeyFingerprint = fingerprint)
+        } else configs.map { (name, bytes) ->
             val document = StunnelDocument.parse(bytes.toString(Charsets.UTF_8))
             document.validate()
-            val section = document.sections.first()
-            val kind = if (document.remotes(section).first().port == 9984) ProxyKind.SOCKS5 else ProxyKind.HTTP_CONNECT
-            TunnelProfile(name = name.substringBeforeLast('.'), config = bytes.toString(Charsets.UTF_8),
-                selectedSection = section, proxyKind = kind, files = encoded,
-                openVpnConfig = vpn.values.firstOrNull()?.toString(Charsets.UTF_8).orEmpty())
+            val hint = hints[name]
+            val section = hint?.section?.also { require(it in document.sections) { "The manifest names an unknown tunnel section: $it" } }
+                ?: document.sections.first()
+            val kind = hint?.proxyKind ?: if (document.remotes(section).first().port == 9984) ProxyKind.SOCKS5 else ProxyKind.HTTP_CONNECT
+            val openVpn = vpn.values.firstOrNull()?.toString(Charsets.UTF_8).orEmpty()
+            val mode = hint?.mode ?: ConnectionMode.PROXY_VPN
+            require(mode != ConnectionMode.OPENVPN || openVpn.isNotBlank()) { "The manifest selects OpenVPN, but the package has no .ovpn profile" }
+            TunnelProfile(name = hint?.name ?: name.substringBeforeLast('.'), config = bytes.toString(Charsets.UTF_8),
+                selectedSection = section, proxyKind = kind, files = encoded, mode = mode,
+                openVpnViaStunnel = mode == ConnectionMode.OPENVPN, dnsMode = hint?.dnsMode ?: DnsMode.DOH,
+                openVpnConfig = openVpn, operatorKeyFingerprint = fingerprint)
         }
+        require(profiles.all { it.name.isNotBlank() && it.name.length <= 128 }) { "Profile names must have 1 to 128 characters" }
+        return ImportPlan(profiles, verified?.fingerprint)
     }
 }

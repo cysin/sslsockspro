@@ -103,7 +103,7 @@ def build(args):
     run(['make', '-j' + JOBS, '-C', 'lib', 'liblz4.a'], lz4, environment)
     cli_environment = environment | {
         'CPPFLAGS': '-I' + str(prefix / 'include'),
-        'LDFLAGS': linker + ' ' + str(protect) + ' -Wl,--wrap=connect -L' + str(prefix / 'lib'),
+        'LDFLAGS': linker + ' ' + str(protect) + ' -Wl,--wrap=connect -Wl,--wrap=accept -Wl,--wrap=accept4 -L' + str(prefix / 'lib'),
         'PKG_CONFIG_LIBDIR': str(prefix / 'lib/pkgconfig'),
     }
     stunnel = WORK / 'stunnel-build'

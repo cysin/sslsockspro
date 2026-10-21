@@ -6,6 +6,10 @@ import java.util.Locale
 /** Preserves inline credentials and connection blocks. The application owns
  * the management socket, TUN interface, and executable lifecycle. */
 object OpenVpnDocument {
+    /** The authenticated local relay that carries OpenVPN's TCP connection
+     * through stunnel. [authFile] holds the relay's username and password. */
+    data class HttpProxyRoute(val endpoint: Endpoint, val authFile: String)
+
     data class Line(val raw: String, val key: String? = null, val arguments: List<String> = emptyList())
     private val forbidden = setOf("up", "down", "route-up", "route-pre-down", "ipchange", "tls-verify",
         "auth-user-pass-verify", "client-connect", "client-disconnect", "plugin", "script-security",
@@ -13,10 +17,12 @@ object OpenVpnDocument {
         "log", "log-append", "status", "writepid", "daemon", "chroot", "user", "group", "cd", "config",
         "secret", "server", "server-bridge", "tls-server", "mode", "tls-export-cert", "askpass",
         "http-proxy", "socks-proxy", "http-proxy-user-pass", "http-proxy-override", "providers", "engine",
-        "pkcs11-providers", "replay-persist", "tmp-dir", "tls-crypt-v2-verify", "learn-address", "iproute")
+        "pkcs11-providers", "replay-persist", "tmp-dir", "tls-crypt-v2-verify", "learn-address", "iproute",
+        // Sends the MAC address, kernel version and UV_ variables to the server.
+        "push-peer-info")
     private val owned = setOf("dev", "dev-type", "route-noexec", "ifconfig-noexec", "persist-tun",
         "management-hold", "management-query-passwords", "management-signal", "verb", "mute",
-        "suppress-timestamps", "auth-nocache", "pull-filter")
+        "suppress-timestamps", "auth-nocache")
     private val fileOptions = setOf("ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2", "pkcs12",
         "crl-verify", "auth-user-pass", "extra-certs")
     private val inlineOptions = fileOptions - "crl-verify" + "peer-fingerprint"
@@ -80,28 +86,48 @@ object OpenVpnDocument {
         return lines
     }
 
+    /** Without tls-crypt, OpenVPN's TLS handshake is visible on the network;
+     * TLS 1.3 is then required so the client certificate stays encrypted. */
+    private fun hidesCertificate(parsed: List<Line>) =
+        parsed.any { it.key in setOf("tls-crypt", "tls-crypt-v2") || it.raw.trim() in setOf("<tls-crypt>", "<tls-crypt-v2>") }
+
     fun validate(config: String) {
         val parsed = lines(config)
-        for ((index, line) in parsed.withIndex()) {
-            val key = line.key ?: continue
-            require(key !in forbidden) { "OpenVPN line " + (index + 1) + ": $key is unavailable in Android profiles" }
-            require(!key.startsWith("management-") || key in owned) { "The app owns OpenVPN management options" }
-            if (key == "setenv" || key == "setenv-safe") require(line.arguments.firstOrNull()?.let {
-                it.startsWith("SSP_") || it.startsWith("LD_") || it.startsWith("OPENSSL_")
-            } != true) { "OpenVPN cannot override native protection or provider environments" }
-            require(key != "dev" || line.arguments.firstOrNull()?.startsWith("tap") != true) { "Android VPN requires a TUN profile; TAP is unsupported" }
-            require(key != "dev-type" || line.arguments.firstOrNull() == "tun") { "Android VPN supports dev-type tun only" }
-            require(key !in setOf("compress", "comp-lzo") || line.arguments.firstOrNull() in setOf("no", "stub", "stub-v2")) { "VPN compression is disabled for privacy and safety" }
-            require(key != "allow-compression" || line.arguments.firstOrNull() == "no") { "VPN compression must be disabled" }
-            require(key != "proto" || line.arguments.firstOrNull() in setOf("udp", "udp4", "udp6", "tcp", "tcp-client", "tcp4-client", "tcp6-client")) { "Unsupported OpenVPN client protocol" }
-            require(key != "remote-cert-tls" || line.arguments == listOf("server")) { "OpenVPN must verify a server certificate" }
-            require(key != "tls-version-min" || line.arguments.firstOrNull() in setOf("1.2", "1.3")) { "OpenVPN requires TLS 1.2 or later" }
-            require(key != "crl-verify" || line.arguments.size == 1) { "Directory CRLs are unsupported; import a CRL file" }
-        }
+        val hidden = hidesCertificate(parsed)
+        for ((index, line) in parsed.withIndex()) checkOption(index + 1, line.key ?: continue, line.arguments, hidden)
         require(remotes(parsed).isNotEmpty()) { "OpenVPN profile needs a remote server" }
         require(parsed.any { it.key in setOf("ca", "pkcs12", "peer-fingerprint") || it.raw.trim() in setOf("<ca>", "<pkcs12>", "<peer-fingerprint>") }) {
             "OpenVPN needs a CA, PKCS#12 identity, or pinned peer fingerprint"
         }
+    }
+
+    private fun checkOption(number: Int, key: String, arguments: List<String>, hidden: Boolean, nested: Boolean = false) {
+        require(key !in forbidden) { "OpenVPN line $number: $key is unavailable in Android profiles" }
+        require(!key.startsWith("management-") || key in owned) { "The app owns OpenVPN management options" }
+        require(!nested || key !in owned) { "OpenVPN line $number: the app manages $key" }
+        // "setenv opt X" makes OpenVPN apply X; validate X like any other line.
+        if (key == "setenv" && arguments.firstOrNull() == "opt") {
+            require(!nested && arguments.size >= 2) { "OpenVPN line $number: invalid setenv opt" }
+            checkOption(number, arguments[1].removePrefix("--").lowercase(Locale.ROOT), arguments.drop(2), hidden, nested = true)
+            return
+        }
+        if (key == "setenv" || key == "setenv-safe") require(arguments.firstOrNull()?.uppercase(Locale.ROOT)?.let { name ->
+            listOf("SSP_", "LD_", "OPENSSL_", "UV_", "IV_").any(name::startsWith)
+        } != true) { "OpenVPN cannot set protection, provider or peer-information variables" }
+        require(key != "dev" || arguments.firstOrNull()?.startsWith("tap") != true) { "Android VPN requires a TUN profile; TAP is unsupported" }
+        require(key != "dev-type" || arguments.firstOrNull() == "tun") { "Android VPN supports dev-type tun only" }
+        require(key !in setOf("compress", "comp-lzo") || arguments.firstOrNull() in setOf("no", "stub", "stub-v2")) { "VPN compression is disabled for privacy and safety" }
+        require(key != "allow-compression" || arguments.firstOrNull() == "no") { "VPN compression must be disabled" }
+        require(key != "proto" || arguments.firstOrNull() in setOf("udp", "udp4", "udp6", "tcp", "tcp-client", "tcp4-client", "tcp6-client")) { "Unsupported OpenVPN client protocol" }
+        require(key != "remote-cert-tls" || arguments == listOf("server")) { "OpenVPN must verify a server certificate" }
+        if (key == "tls-version-min" || key == "tls-version-max") {
+            val allowed = if (hidden) setOf("1.2", "1.3") else setOf("1.3")
+            require(arguments.firstOrNull() in allowed && (key == "tls-version-max" || arguments.size == 1)) {
+                if (hidden) "OpenVPN requires TLS 1.2 or later"
+                else "Without tls-crypt, OpenVPN must use TLS 1.3 so the client certificate is encrypted. Add tls-crypt or use a TLS 1.3 server."
+            }
+        }
+        require(key != "crl-verify" || arguments.size == 1) { "Directory CRLs are unsupported; import a CRL file" }
     }
 
     fun remotes(config: String): List<Endpoint> = remotes(lines(config))
@@ -119,14 +145,17 @@ object OpenVpnDocument {
         .mapNotNull { it.arguments.firstOrNull() }.distinct()
 
     fun runtime(config: String, credentials: (String) -> String, managementSocket: String,
-                proxy: Pair<String, Endpoint>?, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
+                proxy: HttpProxyRoute?, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
         validate(config)
         val parsed = lines(config)
         val result = StringBuilder()
+        // pull-filter uses the first matching rule, so the app's rules precede
+        // any rules in the imported profile.
+        result.append("pull-filter reject \"http-proxy\"\n")
         // Connection blocks inherit defaults at parse time, so the proxy must
         // be configured before the first block, not appended afterward.
-        if (proxy != null) result.append("proto tcp-client\n").append(proxy.first).append(' ')
-            .append(quoted(proxy.second.host)).append(' ').append(proxy.second.port).append('\n')
+        if (proxy != null) result.append("proto tcp-client\nhttp-proxy ").append(quoted(proxy.endpoint.host)).append(' ')
+            .append(proxy.endpoint.port).append(' ').append(quoted(proxy.authFile)).append(" basic\n")
         var connectionBlock = false
         for (line in parsed) {
             val key = line.key
@@ -155,8 +184,7 @@ object OpenVpnDocument {
         result.append("\ndev tun\ndev-type tun\nmanagement ").append(quoted(managementSocket))
             .append(" unix\nmanagement-query-passwords\nmanagement-hold\nmanagement-signal\nverb 3\nallow-compression no\n")
         if (parsed.none { it.key == "remote-cert-tls" }) result.append("remote-cert-tls server\n")
-        if (parsed.none { it.key == "tls-version-min" }) result.append("tls-version-min 1.2\n")
-        result.append("pull-filter reject \"http-proxy\"\n")
+        if (parsed.none { it.key == "tls-version-min" }) result.append(if (hidesCertificate(parsed)) "tls-version-min 1.2\n" else "tls-version-min 1.3\n")
         return result.toString()
     }
 

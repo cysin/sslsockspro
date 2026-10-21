@@ -20,10 +20,9 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import io.github.cysin.sslsockspro.R
 import io.github.cysin.sslsockspro.TunnelApplication
-import io.github.cysin.sslsockspro.config.Endpoint
 import io.github.cysin.sslsockspro.config.GatewayPlan
-import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
+import io.github.cysin.sslsockspro.data.Gateways
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.engine.EngineService
 import io.github.cysin.sslsockspro.engine.IEngineCallback
@@ -32,6 +31,7 @@ import io.github.cysin.sslsockspro.model.AppSettings
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.ConnectionStatus
 import io.github.cysin.sslsockspro.model.TunnelProfile
+import io.github.cysin.sslsockspro.privacy.Redactor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -182,15 +182,14 @@ class ConnectionService : VpnService(), TunnelPlatform {
     override fun bindSocketsTo(network: NetworkSnapshot?) { underlying = network?.key as Network? }
     override fun advertise(network: NetworkSnapshot) { setUnderlyingNetworks(arrayOf(network.key as Network)) }
     override suspend fun resolveGateways(profile: TunnelProfile, network: NetworkSnapshot): GatewayPlan = withContext(Dispatchers.IO) {
-        val endpoints = mutableListOf<Endpoint>()
-        if (profile.mode != ConnectionMode.OPENVPN || profile.openVpnViaStunnel) {
-            val document = StunnelDocument.parse(profile.config)
-            document.sections.forEach { endpoints += document.remotes(it) }
-        }
-        if (profile.mode == ConnectionMode.OPENVPN && !profile.openVpnViaStunnel) {
-            endpoints += OpenVpnDocument.remotes(profile.openVpnConfig)
-        }
+        val endpoints = Gateways.endpoints(profile)
         GatewayPlan.create(endpoints) { host -> (network.key as Network).getAllByName(host).map { it.hostAddress!! } }
+            .also { plan ->
+                // OpenVPN servers reached through stunnel are named only in its logs.
+                val carried = if (profile.mode == ConnectionMode.OPENVPN && profile.openVpnViaStunnel)
+                    OpenVpnDocument.remotes(profile.openVpnConfig).map { it.host } else emptyList()
+                Redactor.sensitiveNames(plan.hosts.keys + carried)
+            }
     }
 
     override fun establishBlocking(profile: TunnelProfile) = establish(JSONObject())
@@ -224,6 +223,10 @@ class ConnectionService : VpnService(), TunnelPlatform {
         }
         (selected.includedApps - routed.toSet()).forEach { TunnelState.log("Skipped a selected app that is not installed: $it") }
         routed.forEach { builder.addAllowedApplication(it) }
+        // Android attributes loopback connections only for apps a VPN covers;
+        // the internal relay and listener rely on that to admit only this app.
+        // Its own non-loopback sockets are protected gateway connections.
+        if (routed.isNotEmpty() && packageName !in routed) builder.addAllowedApplication(packageName)
         val replacement = builder.establish() ?: error("Android revoked VPN permission")
         val previous = tun
         tun = replacement
@@ -267,8 +270,12 @@ class ConnectionService : VpnService(), TunnelPlatform {
     private fun notification(message: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, io.github.cysin.sslsockspro.ui.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 1, Intent(this, ConnectionService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        // The lock screen shows only this generic version, never connection details.
+        val public = Notification.Builder(this, "tunnel").setSmallIcon(R.drawable.ic_tunnel).setContentTitle("SSLSocks Pro")
+            .setContentText("Tunnel status is hidden on the lock screen").build()
         return Notification.Builder(this, "tunnel").setSmallIcon(R.drawable.ic_tunnel).setContentTitle("SSLSocks Pro")
             .setContentText(message.take(160)).setContentIntent(open).setOngoing(true)
+            .setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(public)
             .apply { if (!isAlwaysOn) addAction(Notification.Action.Builder(null, "Disconnect", stop).build()) }.build()
     }
 

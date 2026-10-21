@@ -26,10 +26,10 @@ class OpenVpnDocumentTest {
         val text = OpenVpnDocument.runtime(configuration, { error("No external credential is expected") }, "/private/control.sock", null)
         assertTrue(text.contains("peer-fingerprint AB:AB"))
     }
-    @Test fun proxyIsInheritedByConnectionBlocksAndUsesTheSelectedIpv6Listener() {
+    @Test fun proxyIsInheritedByConnectionBlocksAndUsesTheAuthenticatedRelay() {
         val text = OpenVpnDocument.runtime(profile, { "/private/file.pem" }, "/private/control.sock",
-            "http-proxy" to io.github.cysin.sslsockspro.config.Endpoint("::1", 33009))
-        assertTrue(text.startsWith("proto tcp-client\nhttp-proxy \"::1\" 33009\n"))
+            OpenVpnDocument.HttpProxyRoute(io.github.cysin.sslsockspro.config.Endpoint("127.0.0.1", 40123), "/private/relay-auth"))
+        assertTrue(text.startsWith("pull-filter reject \"http-proxy\"\nproto tcp-client\nhttp-proxy \"127.0.0.1\" 40123 \"/private/relay-auth\" basic\n"))
         assertTrue(text.contains("remote \"vpn.example\" \"1194\" tcp-client"))
         assertFalse(text.contains("1194\" \"udp\""))
     }
@@ -46,5 +46,25 @@ class OpenVpnDocumentTest {
             mapOf("vpn.example" to listOf("192.0.2.1", "2001:db8::1")))
         assertTrue(text.contains("remote \"192.0.2.1\" \"443\" \"tcp\"\nremote \"2001:db8::1\" \"443\" \"tcp\"\n"))
         assertFalse(text.contains("vpn.example"))
+    }
+    @Test fun deviceIdentifiersAndNestedOptionsCannotBeSentOrApplied() {
+        for (extra in listOf("push-peer-info", "setenv UV_DEVICE phone-1", "setenv IV_GUI_VER brand", "setenv-safe iv_sso openurl",
+            "setenv opt up /bin/sh", "setenv opt push-peer-info", "setenv opt verb 11", "setenv opt management /x unix")) {
+            assertThrows(extra, IllegalArgumentException::class.java) { OpenVpnDocument.validate(profile + extra + "\n") }
+        }
+        OpenVpnDocument.validate(profile + "setenv opt block-outside-dns\nsetenv FRIENDLY_NAME value\n")
+    }
+    @Test fun clientCertificatesAreNeverSentWithoutEncryption() {
+        assertThrows(IllegalArgumentException::class.java) { OpenVpnDocument.validate(profile + "tls-version-min 1.2\n") }
+        assertThrows(IllegalArgumentException::class.java) { OpenVpnDocument.validate(profile + "tls-version-min 1.3 or-highest\n") }
+        assertTrue(OpenVpnDocument.runtime(profile, { "/private/file.pem" }, "/private/control.sock", null).contains("tls-version-min 1.3\n"))
+        val crypted = profile + "tls-crypt ta.key\ntls-version-min 1.2\n"
+        OpenVpnDocument.validate(crypted)
+        assertTrue(OpenVpnDocument.runtime(profile + "<tls-crypt>\nkey\n</tls-crypt>\n", { "/private/file.pem" }, "/private/control.sock", null)
+            .contains("tls-version-min 1.2\n"))
+    }
+    @Test fun importedPullFiltersFollowTheAppsRules() {
+        val text = OpenVpnDocument.runtime(profile + "pull-filter ignore \"route\"\n", { "/private/file.pem" }, "/private/control.sock", null)
+        assertTrue(text.indexOf("pull-filter reject \"http-proxy\"") < text.indexOf("pull-filter ignore \"route\""))
     }
 }

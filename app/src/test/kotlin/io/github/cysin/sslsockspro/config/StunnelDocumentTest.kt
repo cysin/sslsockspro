@@ -77,4 +77,15 @@ class StunnelDocumentTest {
         assertEquals(plan, GatewayPlan.decode(plan.encode()))
         assertThrows(IllegalArgumentException::class.java) { GatewayPlan.create(listOf(Endpoint("missing.example", 1))) { emptyList() } }
     }
+
+    @Test fun vpnModesReplaceOnlyTheSelectedListener() {
+        val source = StunnelDocument.template("192.0.2.1") + "\n[ssh]\naccept = 127.0.0.1:2222\nconnect = 192.0.2.1:22\n"
+        val runtime = StunnelDocument.parse(source).renderRuntime("/runtime", { "/private/$it" }, listeners = mapOf("proxy" to Endpoint("127.0.0.1", 40001)))
+        assertTrue(runtime.contains("[proxy]\naccept = 127.0.0.1:40001\n"))
+        assertFalse(runtime.contains("accept = 127.0.0.1:33009"))
+        assertTrue(runtime.contains("accept = 127.0.0.1:2222"))
+        assertThrows(IllegalArgumentException::class.java) {
+            StunnelDocument.parse(source).renderRuntime("/runtime", { it }, listeners = mapOf("proxy" to Endpoint("0.0.0.0", 40001)))
+        }
+    }
 }
