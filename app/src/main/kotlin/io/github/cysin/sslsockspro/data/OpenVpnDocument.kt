@@ -145,7 +145,7 @@ object OpenVpnDocument {
         .mapNotNull { it.arguments.firstOrNull() }.distinct()
 
     fun runtime(config: String, credentials: (String) -> String, managementSocket: String,
-                proxy: HttpProxyRoute?, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
+                proxy: HttpProxyRoute?, resolvedHosts: Map<String, List<String>> = emptyMap(), externalKey: Boolean = false): String {
         validate(config)
         val parsed = lines(config)
         val result = StringBuilder()
@@ -157,10 +157,15 @@ object OpenVpnDocument {
         if (proxy != null) result.append("proto tcp-client\nhttp-proxy ").append(quoted(proxy.endpoint.host)).append(' ')
             .append(proxy.endpoint.port).append(' ').append(quoted(proxy.authFile)).append(" basic\n")
         var connectionBlock = false
+        var keyBlock = false
         for (line in parsed) {
             val key = line.key
             when (line.raw.trim()) { "<connection>" -> connectionBlock = true; "</connection>" -> connectionBlock = false }
+            // With a Keystore key, no private key material may reach OpenVPN.
+            if (externalKey && line.raw.trim() in setOf("<key>", "<pkcs12>")) { keyBlock = true; continue }
+            if (keyBlock) { if (line.raw.trim() in setOf("</key>", "</pkcs12>")) keyBlock = false; continue }
             when {
+                externalKey && key in setOf("key", "pkcs12") -> Unit
                 key in owned || (proxy != null && key == "proto") -> Unit
                 key in fileOptions && line.arguments.isNotEmpty() -> {
                     result.append(key).append(' ').append(quoted(credentials(line.arguments[0])))
@@ -185,6 +190,9 @@ object OpenVpnDocument {
         // credentials again; plain rejections still end the connection.
         result.append("\ndev tun\ndev-type tun\nmanagement ").append(quoted(managementSocket))
             .append(" unix\nmanagement-query-passwords\nmanagement-hold\nmanagement-signal\nauth-retry interact\nverb 3\nallow-compression no\n")
+        // The app signs with the Keystore key; OpenVPN sends the message and
+        // its hash algorithm so standard Keystore signatures apply.
+        if (externalKey) result.append("management-external-key pkcs1 pss digest\n")
         if (parsed.none { it.key == "remote-cert-tls" }) result.append("remote-cert-tls server\n")
         if (parsed.none { it.key == "tls-version-min" }) result.append(if (hidesCertificate(parsed)) "tls-version-min 1.2\n" else "tls-version-min 1.3\n")
         return result.toString()

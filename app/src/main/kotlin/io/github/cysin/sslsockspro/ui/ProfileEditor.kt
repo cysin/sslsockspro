@@ -69,7 +69,8 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(profile.openVpnViaStunnel, { onChange(profile.copy(openVpnViaStunnel = it)) }); Text("Carry OpenVPN TCP through stunnel")
                         }
-                        Text("Import an .ovpn file and its companion credentials. TAP, scripts, and compression are unsupported.")
+                        Text("Import an .ovpn file and its companion credentials. TAP, scripts, and compression are unsupported. " +
+                            "RSA and EC client keys move into Android Keystore when saved and can then no longer be exported.")
                         SecureTextField(profile.openVpnConfig, { onChange(profile.copy(openVpnConfig = it)) }, "OpenVPN configuration",
                             Modifier.fillMaxWidth(), singleLine = false, monospace = true, lines = 8)
                         if (!profile.openVpnViaStunnel && Gateways.lookedUpNames(profile).isNotEmpty()) Text(LOOKUP_WARNING, color = MaterialTheme.colorScheme.error)

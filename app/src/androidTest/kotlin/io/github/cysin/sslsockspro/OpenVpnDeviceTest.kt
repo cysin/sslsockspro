@@ -67,6 +67,27 @@ class OpenVpnDeviceTest {
                 Thread.sleep(500)
             }
 
+            // The client key moves into Android Keystore; OpenVPN asks the app
+            // to sign (PK_SIGN) and never sees the private key.
+            val keystore = io.github.cysin.sslsockspro.data.KeystoreKeys.migrate(profile.copy(openVpnViaStunnel = false))
+            assertTrue("The fixture key must move into Keystore", keystore.openVpnKeyAlias.isNotEmpty())
+            assertFalse(keystore.openVpnConfig.contains("PRIVATE KEY"))
+            assertFalse(keystore.files.values.any { String(java.util.Base64.getDecoder().decode(it)).contains("PRIVATE KEY") })
+            try {
+                store.save(keystore)
+                instrumentation.runOnMainSync { ConnectionService.start(context, keystore) }
+                await { TunnelState.status.value.stage == ConnectionStage.CONNECTED }
+                val sentBefore = TunnelState.status.value.bytesSent
+                DatagramSocket().use { socket ->
+                    val payload = ByteArray(128) { 0x42 }
+                    socket.send(DatagramPacket(payload, payload.size, InetAddress.getByName("198.51.100.10"), 9999))
+                }
+                await(10000) { TunnelState.status.value.bytesSent >= sentBefore + 128 }
+                instrumentation.runOnMainSync { ConnectionService.stop(context) }
+                await(10000) { !TunnelState.status.value.running }
+                Thread.sleep(500)
+            } finally { io.github.cysin.sslsockspro.data.KeystoreKeys.delete(keystore.openVpnKeyAlias) }
+
             val ipv6Only = profile.copy(openVpnViaStunnel = false, openVpnConfig = profile.openVpnConfig
                 .replace("ifconfig 10.8.0.2 10.8.0.1\n", "")
                 .replace("dhcp-option DNS 10.8.0.1", "dhcp-option DNS fd00:8::1"))

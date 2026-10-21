@@ -39,6 +39,9 @@ int __real_accept4(int, struct sockaddr *, socklen_t *, int);
 /* Close private listeners when the Android worker exits. Recheck the parent
  * after prctl to close the fork/prctl race. */
 __attribute__((constructor)) static void monitor_parent(void) {
+    /* These processes hold private keys and session secrets: other processes
+     * of the same app user may not attach to them or read their memory. */
+    prctl(PR_SET_DUMPABLE, 0);
     const char *expected = getenv("SSP_PARENT_PID");
     if (!expected) return;
     char *end = NULL;

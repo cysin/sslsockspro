@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.cysin.sslsockspro.data.KeystoreKeys
 import io.github.cysin.sslsockspro.model.TunnelProfile
 
 @Composable
@@ -26,6 +27,13 @@ internal fun ProfilesScreen(ui: MainViewModel, padding: PaddingValues, onDelete:
                 Text(if (profile.operatorKeyFingerprint.isNotEmpty()) "Signed package · operator ${profile.operatorKeyFingerprint.take(16).chunked(4).joinToString(" ")}"
                     else "Unsigned or manually created profile", style = MaterialTheme.typography.bodySmall)
                 ui.tunnels[profile.id].orEmpty().forEach { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                when (ui.keyStorage[profile.id]) {
+                    KeystoreKeys.Storage.KEYSTORE -> Text("OpenVPN key: Android Keystore (cannot be exported or backed up)", style = MaterialTheme.typography.bodySmall)
+                    KeystoreKeys.Storage.MISSING -> Text("The OpenVPN key is not on this phone. Import the client package again.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    KeystoreKeys.Storage.APP_STORAGE -> Text("OpenVPN key: encrypted app storage", style = MaterialTheme.typography.bodySmall)
+                    else -> Unit
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { ui.select(profile.id) { ui.page = 0 } }) { Text("Select") }
                     TextButton(enabled = editable, onClick = { ui.editor = profile }) { Text("Edit") }

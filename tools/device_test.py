@@ -134,6 +134,14 @@ def main():
             raise SystemExit('Device tests failed; see .tools/device-tests.txt.')
     finally:
         stack.close()
+        if openvpn_fixture:
+            # The disposable server logs the peer information each client sent.
+            log = ROOT / '.tools/openvpn-fixture-server.log'
+            text = log.read_text(errors='replace') if log.exists() else ''
+            leaked = sorted({marker for marker in ('IV_HWADDR', 'IV_PLAT_VER', 'UV_', 'IV_SSL') if marker in text})
+            if leaked:
+                raise SystemExit('The OpenVPN client sent identifying peer information: ' + ', '.join(leaked))
+            print('OpenVPN peer information contained no hardware address, kernel version or user variables.')
         if fixture:
             run('shell', 'run-as', 'io.github.cysin.sslsockspro.test', 'rm', '-f', 'files/' + fixture, stdout=subprocess.DEVNULL)
         if openvpn_fixture:

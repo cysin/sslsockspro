@@ -12,6 +12,7 @@ import io.github.cysin.sslsockspro.config.Endpoint
 import io.github.cysin.sslsockspro.config.GatewayPlan
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
+import io.github.cysin.sslsockspro.data.KeystoreKeys
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
 import io.github.cysin.sslsockspro.model.ConnectionMode
 import io.github.cysin.sslsockspro.model.DnsMode
@@ -279,8 +280,12 @@ class EngineService : Service() {
                         authentication.setReadable(false, false); authentication.setReadable(true, true)
                         OpenVpnDocument.HttpProxyRoute(Endpoint("127.0.0.1", relay!!.port), authentication.absolutePath)
                     } else null
+                    val externalKey = profile.openVpnKeyAlias.isNotEmpty()
+                    require(!externalKey || KeystoreKeys.present(profile.openVpnKeyAlias)) {
+                        "The OpenVPN client key is held only by the phone where this profile was imported. Import the client package again on this phone."
+                    }
                     val config = File(directory, "openvpn.conf")
-                    val text = OpenVpnDocument.runtime(profile.openVpnConfig, credentialPath, managementSocket.absolutePath, proxy, hosts)
+                    val text = OpenVpnDocument.runtime(profile.openVpnConfig, credentialPath, managementSocket.absolutePath, proxy, hosts, externalKey)
                     config.writeText(text)
                     openvpn = process("libopenvpn_exec.so", config, allowed)
                     checkRunning()

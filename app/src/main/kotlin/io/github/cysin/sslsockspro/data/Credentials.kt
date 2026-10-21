@@ -142,7 +142,10 @@ object Credentials {
 
     /** Derives the public key from the private key and compares it with the
      * certificate, without relying on platform signature providers. */
-    private fun requireMatchingKey(key: PrivateKeyInfo, certificate: X509Certificate) {
+    private fun requireMatchingKey(key: PrivateKeyInfo, certificate: X509Certificate) =
+        require(keyMatches(key, certificate)) { "Client certificate and private key do not match" }
+
+    fun keyMatches(key: PrivateKeyInfo, certificate: X509Certificate): Boolean {
         val private = runCatching { PrivateKeyFactory.createKey(key) }
             .getOrElse { throw IllegalArgumentException("Unsupported client key algorithm") }
         val public = runCatching { PublicKeyFactory.createKey(SubjectPublicKeyInfo.getInstance(certificate.publicKey.encoded)) }
@@ -157,7 +160,7 @@ object Credentials {
                 private.generatePublicKey().encoded.contentEquals(public.encoded)
             else -> throw IllegalArgumentException("Unsupported client key algorithm")
         }
-        require(matches) { "Client certificate and private key do not match" }
+        return matches
     }
 
     fun normalizeIdentity(bytes: ByteArray, password: CharArray): ByteArray {

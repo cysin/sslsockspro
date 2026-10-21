@@ -110,6 +110,11 @@ class ProfileStore(directory: File, private val sealer: Sealer) {
         writeSettingsUnlocked(readSettingsUnlocked(profiles).copy(selectedProfileId = profile.id))
     }
 
+    /** Replaces a stored profile without changing the selection. */
+    fun saveKeepingSelection(profile: TunnelProfile) = transaction {
+        writeProfilesUnlocked(readProfilesUnlocked().map { if (it.id == profile.id) profile else it })
+    }
+
     fun delete(id: String) = transaction {
         val profiles = readProfilesUnlocked().filterNot { it.id == id }
         writeProfilesUnlocked(profiles)

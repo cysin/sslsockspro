@@ -39,7 +39,8 @@ internal fun SettingsScreen(ui: MainViewModel, padding: PaddingValues, onRestore
         }
         OutlinedButton(onClick = { ui.password = ""; ui.passwordAction = "export" }, enabled = ui.backup.profiles.isNotEmpty()) { Text("Create encrypted local backup") }
         OutlinedButton(enabled = !status.running, onClick = onRestore) { Text("Restore encrypted local backup") }
-        Text("Backups include private credentials and require your password. Keep the password separately; it cannot be recovered.")
+        Text("Backups include private credentials and require your password. Keep the password separately; it cannot be recovered. " +
+            "OpenVPN keys held in Android Keystore are never included; keep the original client package to set up another phone.")
         HorizontalDivider()
         Text("Components", style = MaterialTheme.typography.titleLarge)
         var versions by remember { mutableStateOf("") }

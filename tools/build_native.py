@@ -79,8 +79,14 @@ def build(args):
     WORK.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     compiler = TOOLCHAIN / 'aarch64-linux-android36-clang'
-    flags = '-O2 -fPIE -fstack-protector-strong -ffile-prefix-map=' + str(ROOT) + '=.'
-    linker = '-pie -Wl,-z,max-page-size=16384 -Wl,-z,relro,-z,now'
+    # Hardening for code that parses network input: checked libc calls, stack
+    # clash probes and zero-initialized locals.
+    flags = ('-O2 -fPIE -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fstack-clash-protection '
+             '-ftrivial-auto-var-init=zero -ffile-prefix-map=' + str(ROOT) + '=.')
+    linker = '-pie -Wl,-z,max-page-size=16384 -Wl,-z,relro,-z,now -Wl,-z,noexecstack'
+    # Executables ask for asynchronous heap memory tagging; devices without
+    # MTE ignore the note.
+    memtag = ' -fsanitize=memtag-heap -fsanitize-memtag-mode=async'
     environment = os.environ | {
         'ANDROID_NDK_ROOT': str(NDK), 'PATH': str(TOOLCHAIN) + os.pathsep + os.environ['PATH'],
         'CC': str(compiler), 'AR': str(TOOLCHAIN / 'llvm-ar'), 'RANLIB': str(TOOLCHAIN / 'llvm-ranlib'),
@@ -95,7 +101,9 @@ def build(args):
     install_root = WORK / 'openssl-install'
     prefix = install_root / 'sslsockspro'
     if not (prefix / 'lib/libssl.a').exists() or args.force:
+        # Protocols and features neither stunnel nor OpenVPN uses are left out.
         run([perl_runtime, SOURCES / 'openssl/Configure', 'android-arm64', 'no-shared', 'no-tests', 'no-module',
+             'no-quic', 'no-dtls', 'no-srp', 'no-comp', 'no-ssl3', 'no-weak-ssl-ciphers',
              '-D__ANDROID_API__=36', '--prefix=/sslsockspro', '--openssldir=/sslsockspro/ssl', '--libdir=lib'], openssl, environment)
         run(['make', '-j' + JOBS, 'build_libs'], openssl, environment)
         run(['make', 'install_dev', 'DESTDIR=' + str(install_root)], openssl, environment)
@@ -103,7 +111,7 @@ def build(args):
     run(['make', '-j' + JOBS, '-C', 'lib', 'liblz4.a'], lz4, environment)
     cli_environment = environment | {
         'CPPFLAGS': '-I' + str(prefix / 'include'),
-        'LDFLAGS': linker + ' ' + str(protect) + ' -Wl,--wrap=connect -Wl,--wrap=accept -Wl,--wrap=accept4 -L' + str(prefix / 'lib'),
+        'LDFLAGS': linker + memtag + ' ' + str(protect) + ' -Wl,--wrap=connect -Wl,--wrap=accept -Wl,--wrap=accept4 -L' + str(prefix / 'lib'),
         'PKG_CONFIG_LIBDIR': str(prefix / 'lib/pkgconfig'),
     }
     stunnel = WORK / 'stunnel-build'
@@ -144,7 +152,8 @@ def build(args):
          'APP_BUILD_SCRIPT=' + str(hev / 'Android.mk'), 'NDK_APPLICATION_MK=' + str(hev / 'Application.mk'),
          'APP_ABI=' + ABI, 'APP_PLATFORM=android-36', 'NDK_OUT=' + str(WORK / 'hev-obj'),
          'NDK_LIBS_OUT=' + str(WORK / 'hev-libs'),
-         'APP_CFLAGS=-O2 -DANDROID -DPKGNAME=io/github/cysin/sslsockspro/engine -DCLSNAME=HevEngine -fstack-protector-strong'], hev, environment)
+         'APP_CFLAGS=-O2 -DANDROID -DPKGNAME=io/github/cysin/sslsockspro/engine -DCLSNAME=HevEngine -fstack-protector-strong '
+         '-D_FORTIFY_SOURCE=2 -fstack-clash-protection -ftrivial-auto-var-init=zero'], hev, environment)
     shutil.copy2(WORK / 'hev-libs' / ABI / 'libhev-socks5-tunnel.so', OUTPUT / 'libhev-socks5-tunnel.so')
     for name in binaries:
         run([TOOLCHAIN / 'llvm-strip', '--strip-unneeded', OUTPUT / name], WORK, environment)
@@ -153,6 +162,10 @@ def build(args):
         alignments = [line.split()[-1] for line in report.splitlines() if line.strip().startswith('LOAD')]
         if not alignments or any(int(value, 16) < 16384 for value in alignments):
             raise RuntimeError('Native library is not 16 KiB aligned: ' + name)
+        if name.endswith('_exec.so'):
+            notes = subprocess.check_output([str(TOOLCHAIN / 'llvm-readelf'), '--notes', str(OUTPUT / name)], text=True)
+            if 'NT_ANDROID_TYPE_MEMTAG' not in notes:
+                raise RuntimeError('Executable lacks the memory tagging note: ' + name)
     stamp.write_text(fingerprint + '\n')
     state.write_text(json.dumps(checksums(), indent=2) + '\n')
     versions = {name: entry['version'] for name, entry in manifest.items()}

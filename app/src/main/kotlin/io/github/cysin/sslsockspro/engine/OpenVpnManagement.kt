@@ -9,6 +9,7 @@ import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.ParcelFileDescriptor
 import android.system.Os
+import io.github.cysin.sslsockspro.data.KeystoreKeys
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,7 +51,8 @@ class OpenVpnManagement(
             catch (_: Exception) { Thread.sleep(100) }
         }
         check(connected) { "OpenVPN management interface did not start" }
-        command("state on\nbytecount 1\nhold release\n")
+        // Version 3 makes OpenVPN name the algorithm in PK_SIGN requests.
+        command("version 3\nstate on\nbytecount 1\nhold release\n")
         thread = Thread({ read() }, "openvpn-events").apply { isDaemon = true; start() }
     }
 
@@ -103,6 +105,7 @@ class OpenVpnManagement(
             line.startsWith("PROTECTFD:") -> descriptors.pollFirst()?.let { descriptor ->
                 try { ParcelFileDescriptor.dup(descriptor).use { callback.protectSocket(it, session) } } finally { Os.close(descriptor) }
             }
+            line.startsWith(">PK_SIGN:") -> sign(line.substringAfter(':'))
             line.startsWith(">FATAL:") -> callback.event(EngineEvent.OPENVPN_FATAL, "", session)
         }
     }
@@ -137,6 +140,21 @@ class OpenVpnManagement(
                 command("password ${quoted(name)} ${quoted(profile.openVpnKeyPassphrase)}\n")
             else -> callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session)
         }
+    }
+
+    /** Signs with the Keystore key; OpenVPN never holds the private key. */
+    private fun sign(request: String) {
+        val signature = runCatching {
+            KeystoreKeys.sign(profile.openVpnKeyAlias, java.util.Base64.getDecoder().decode(request.substringBefore(',')),
+                request.substringAfter(',', "RSA_PKCS1_PADDING"))
+        }.getOrNull()
+        if (signature == null) {
+            callback.event(EngineEvent.CONFIG_ERROR, "Android Keystore could not sign with the OpenVPN client key", session)
+            command("signal SIGTERM\n")
+            return
+        }
+        val lines = java.util.Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(signature)
+        command("pk-sig\n$lines\nEND\n")
     }
 
     private fun prompt(text: String, echo: Boolean) = JSONObject().put("text", text.take(512)).put("echo", echo).toString()

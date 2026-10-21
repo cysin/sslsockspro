@@ -11,6 +11,7 @@ import io.github.cysin.sslsockspro.TunnelApplication
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.CertificateSummary
 import io.github.cysin.sslsockspro.data.Credentials
+import io.github.cysin.sslsockspro.data.KeystoreKeys
 import io.github.cysin.sslsockspro.data.PackageImporter
 import io.github.cysin.sslsockspro.data.PackageManifest
 import io.github.cysin.sslsockspro.model.AppSettings
@@ -42,12 +43,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Per profile ID; recomputed only when that profile changes. */
     var certificates by mutableStateOf<Map<String, List<CertificateSummary>>>(emptyMap()); private set
     var tunnels by mutableStateOf<Map<String, List<String>>>(emptyMap()); private set
+    var keyStorage by mutableStateOf<Map<String, KeystoreKeys.Storage>>(emptyMap()); private set
+    private var keysMigrated = false
     private val summaries = mutableMapOf<String, Pair<Long, Pair<List<CertificateSummary>, List<String>>>>()
 
     val selected: TunnelProfile?
         get() = backup.profiles.firstOrNull { it.id == backup.settings.selectedProfileId } ?: backup.profiles.firstOrNull()
 
-    init { refresh() }
+    init { refresh { migrateKeys() } }
+
+    /** Once per process: move existing OpenVPN keys into Keystore. */
+    private fun migrateKeys() {
+        if (keysMigrated) return
+        keysMigrated = true
+        viewModelScope.launch {
+            val moved = withContext(Dispatchers.IO) {
+                backup.profiles.mapNotNull { profile -> runCatching { KeystoreKeys.migrate(profile) }.getOrNull()?.takeIf { it != profile } }
+                    .onEach { store.saveKeepingSelection(it) }
+            }
+            if (moved.isNotEmpty()) refresh()
+        }
+    }
 
     fun refresh(then: () -> Unit = {}) {
         viewModelScope.launch {
@@ -73,6 +89,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         profiles.forEach { summaries[it.id] = it.modifiedAt to computed.getValue(it.id) }
         certificates = computed.mapValues { it.value.first }
         tunnels = computed.mapValues { it.value.second }
+        keyStorage = withContext(Dispatchers.Default) { profiles.associate { it.id to KeystoreKeys.storage(it) } }
     }
 
     private fun tunnelLines(profile: TunnelProfile): List<String> =
@@ -103,13 +120,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val stored = backup.profiles.firstOrNull { it.id == profile.id }
         val signed = stored != null && stored.config == profile.config && stored.openVpnConfig == profile.openVpnConfig && stored.files == profile.files
         val saved = if (signed) profile else profile.copy(operatorKeyFingerprint = "")
-        withContext(Dispatchers.IO) { store.save(saved) }
+        withContext(Dispatchers.IO) { store.save(runCatching { KeystoreKeys.migrate(saved) }.getOrDefault(saved)) }
         editor = null
         refresh()
     }
 
     fun delete(id: String) = perform("Could not delete profile") {
-        withContext(Dispatchers.IO) { store.delete(id) }
+        val alias = backup.profiles.firstOrNull { it.id == id }?.openVpnKeyAlias.orEmpty()
+        withContext(Dispatchers.IO) { store.delete(id); KeystoreKeys.delete(alias) }
         refresh()
     }
 
@@ -141,7 +159,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun confirmImport() = perform("Could not import files") {
         val plan = pendingImport ?: return@perform
         pendingImport = null
-        withContext(Dispatchers.IO) { plan.profiles.forEach(store::save) }
+        withContext(Dispatchers.IO) { plan.profiles.forEach { store.save(runCatching { KeystoreKeys.migrate(it) }.getOrDefault(it)) } }
         refresh { page = 1 }
     }
 

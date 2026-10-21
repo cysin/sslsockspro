@@ -13,7 +13,8 @@
     <application android:name=".TunnelApplication" android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules" android:fullBackupContent="false"
         android:label="SSLSocks Pro" android:icon="@drawable/ic_tunnel"
-        android:theme="@style/AppTheme" android:supportsRtl="true" android:usesCleartextTraffic="false">
+        android:theme="@style/AppTheme" android:supportsRtl="true" android:usesCleartextTraffic="false"
+        android:memtagMode="async">
         <activity android:name=".ui.MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
             <!-- Client packages and backups opened or shared from other apps.

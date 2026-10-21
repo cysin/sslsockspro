@@ -40,4 +40,19 @@ class NativeComponentsTest {
     @Test fun packetEngineJniLoadsAndReportsIdle() {
         assertFalse(HevEngine().TProxyIsRunning())
     }
+
+    /** Engines holding keys are not dumpable: even this app's other
+     * processes cannot read their memory or environment. */
+    @Test fun nativeEnginesAreNotDumpable() {
+        val executable = File(context.applicationInfo.nativeLibraryDir, "libopenvpn_exec.so")
+        // Process.pid() needs API 37: the shell prints its PID, then becomes
+        // the engine, which waits for its configuration on stdin.
+        val child = ProcessBuilder("/system/bin/sh", "-c", "echo \$\$; exec \"\$0\" --config /dev/stdin", executable.absolutePath).start()
+        try {
+            val pid = child.inputStream.bufferedReader().readLine()!!.trim().toInt()
+            Thread.sleep(300)
+            assertTrue("The engine must still be running", child.isAlive)
+            assertThrows(java.io.IOException::class.java) { File("/proc/$pid/environ").readBytes() }
+        } finally { child.destroyForcibly(); child.waitFor(5, TimeUnit.SECONDS) }
+    }
 }
