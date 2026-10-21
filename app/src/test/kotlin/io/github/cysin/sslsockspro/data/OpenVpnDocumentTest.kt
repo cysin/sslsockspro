@@ -67,4 +67,9 @@ class OpenVpnDocumentTest {
         val text = OpenVpnDocument.runtime(profile + "pull-filter ignore \"route\"\n", { "/private/file.pem" }, "/private/control.sock", null)
         assertTrue(text.indexOf("pull-filter reject \"http-proxy\"") < text.indexOf("pull-filter ignore \"route\""))
     }
+    @Test fun dynamicChallengesCanAskAgainButImportedRetryPoliciesCannotChangeIt() {
+        val text = OpenVpnDocument.runtime(profile + "auth-retry nointeract\n", { "/private/file.pem" }, "/private/control.sock", null)
+        assertTrue(text.contains("auth-retry interact\n"))
+        assertFalse(text.contains("nointeract"))
+    }
 }

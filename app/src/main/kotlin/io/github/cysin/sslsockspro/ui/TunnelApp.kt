@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
+import android.content.Intent
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.PackageImporter
@@ -31,12 +33,13 @@ import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.service.ConnectionService
 import io.github.cysin.sslsockspro.service.TunnelState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun TunnelApp() {
+internal fun TunnelApp(incoming: MutableStateFlow<Intent?>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val ui: MainViewModel = viewModel()
@@ -49,23 +52,45 @@ internal fun TunnelApp() {
         }
         return "import.conf"
     }
+    /** Reads selected documents within import limits; overlapping names must agree. */
+    suspend fun read(uris: List<Uri>): Map<String, ByteArray> = withContext(Dispatchers.IO) {
+        val combined = linkedMapOf<String, ByteArray>()
+        for (uri in uris) {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { PackageImporter.boundedRead(it, PackageImporter.MAX_TOTAL) } ?: continue
+            PackageImporter.entries(bytes, filename(uri)).forEach { (name, data) ->
+                require(combined[name] == null || combined[name]!!.contentEquals(data)) { "Choose one client package at a time when credential filenames overlap" }
+                combined[name] = data
+            }
+            require(combined.size <= 128 && combined.values.sumOf { it.size.toLong() } <= PackageImporter.MAX_TOTAL) { "Selected files exceed import limits" }
+        }
+        combined
+    }
     val importFiles = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         scope.launch {
-            try {
-                ui.import(withContext(Dispatchers.IO) {
-                    val combined = linkedMapOf<String, ByteArray>()
-                    for (uri in uris) {
-                        val bytes = context.contentResolver.openInputStream(uri)?.use { PackageImporter.boundedRead(it, PackageImporter.MAX_TOTAL) } ?: continue
-                        PackageImporter.entries(bytes, filename(uri)).forEach { (name, data) ->
-                            require(combined[name] == null || combined[name]!!.contentEquals(data)) { "Choose one client package at a time when credential filenames overlap" }
-                            combined[name] = data
-                        }
-                        require(combined.size <= 128 && combined.values.sumOf { it.size.toLong() } <= PackageImporter.MAX_TOTAL) { "Selected files exceed import limits" }
-                    }
-                    combined
-                })
-            } catch (failure: Exception) { ui.error = failure.message ?: "Could not import files" }
+            try { ui.import(read(uris)) } catch (failure: Exception) { ui.error = failure.message ?: "Could not import files" }
         }
+    }
+    // Opened or shared by another app: always confirmed, never attached to a draft.
+    val shared by incoming.collectAsStateWithLifecycle()
+    LaunchedEffect(shared) {
+        val intent = shared ?: return@LaunchedEffect
+        incoming.value = null
+        val uris = when (intent.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> emptyList()
+        }.filter { it.scheme == "content" }
+        if (uris.isEmpty()) return@LaunchedEffect
+        try {
+            if (uris.size == 1 && filename(uris.single()).endsWith(".sspbackup", ignoreCase = true)) {
+                require(!TunnelState.status.value.running) { "Disconnect before restoring a backup." }
+                ui.pendingRestore = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uris.single())!!.use { PackageImporter.boundedRead(it, 32 * 1024 * 1024 + 52) }
+                }
+                ui.password = ""; ui.passwordAction = "restore"
+            } else ui.importShared(read(uris))
+        } catch (failure: Exception) { ui.error = failure.message ?: "Could not open the shared files" }
     }
     val restoreFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) scope.launch {
@@ -172,6 +197,18 @@ internal fun TunnelApp() {
                 } },
                 confirmButton = { TextButton(onClick = ui::confirmImport) { Text("Import") } },
                 dismissButton = { TextButton(onClick = { ui.pendingImport = null }) { Text("Cancel") } })
+        }
+        val challenge by TunnelState.challenge.collectAsStateWithLifecycle()
+        challenge?.let { prompt ->
+            var code by remember(prompt) { mutableStateOf("") }
+            AlertDialog(onDismissRequest = { },
+                title = { Text("Verification code") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(prompt.text.ifBlank { "Your OpenVPN server asks for a code." })
+                    SecureTextField(code, { code = it }, "Code", Modifier.fillMaxWidth(), secret = !prompt.echo)
+                } },
+                confirmButton = { TextButton(onClick = { TunnelState.answerChallenge(code); code = "" }) { Text("Send") } },
+                dismissButton = { TextButton(onClick = { TunnelState.challenge(null); ConnectionService.stop(context) }) { Text("Disconnect") } })
         }
         ui.error?.let { message ->
             AlertDialog(onDismissRequest = { ui.error = null }, title = { Text("Action needs attention") }, text = { Text(message) },

@@ -51,6 +51,10 @@ class TunnelControllerTest {
         override fun unbindEngine() { engineBound = false; engineReady = false; events += "unbind" }
         override fun engineNetworkChanged(session: String, sameNetwork: Boolean) { events += "networkChanged:$sameNetwork" }
         override fun log(message: String) { }
+        var notice: String? = null
+        override fun notice(message: String?) { notice = message }
+        var challenge: String? = null
+        override fun challenge(prompt: String?) { challenge = prompt }
         override fun notify(message: String) { }
         override fun stopService() { serviceStopped = true }
     }
@@ -235,5 +239,16 @@ class TunnelControllerTest {
         platform.network = NetworkSnapshot("hotspot", 2)
         controller.networkChanged(); settle()
         assertEquals("Sign-in completion reconnects", 2, platform.started.size)
+    }
+
+    @Test fun challengesAskTheUserWithoutChangingTheStage() {
+        val session = connected()
+        controller.engineEvent(EngineEvent.CHALLENGE, "{\"text\":\"Enter OTP\",\"echo\":true}", session)
+        assertEquals(ConnectionStage.CONNECTED, platform.status.stage)
+        assertEquals("{\"text\":\"Enter OTP\",\"echo\":true}", platform.challenge)
+        assertEquals("OpenVPN asks for a verification code. Open SSLSocks Pro to answer it.", platform.status.message)
+        controller.engineEvent(EngineEvent.NOTICE, "The server answered as SOCKS5", session)
+        assertEquals("The server answered as SOCKS5", platform.notice)
+        assertEquals(ConnectionStage.CONNECTED, platform.status.stage)
     }
 }

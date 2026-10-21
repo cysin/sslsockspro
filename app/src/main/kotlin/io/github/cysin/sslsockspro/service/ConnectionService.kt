@@ -18,6 +18,7 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.service.quicksettings.TileService
 import io.github.cysin.sslsockspro.R
 import io.github.cysin.sslsockspro.TunnelApplication
 import io.github.cysin.sslsockspro.config.GatewayPlan
@@ -115,6 +116,14 @@ class ConnectionService : VpnService(), TunnelPlatform {
         super.onCreate()
         // Traffic counters cost wakeups; the worker reports them only while
         // the app is on screen.
+        scope.launch { TunnelState.testRequests.collect { testConnection() } }
+        scope.launch {
+            TunnelState.challengeAnswers.collect { response ->
+                val worker = engine ?: return@collect
+                val session = controller.session.takeIf { it.isNotEmpty() } ?: return@collect
+                launch(Dispatchers.IO) { runCatching { worker.answerChallenge(session, response) } }
+            }
+        }
         scope.launch {
             TunnelState.uiVisible.collect {
                 val worker = engine ?: return@collect
@@ -123,6 +132,15 @@ class ConnectionService : VpnService(), TunnelPlatform {
                 launch(Dispatchers.IO) { runCatching { worker.setStatsInterval(session, interval) } }
             }
         }
+    }
+
+    /** Requested from the status screen; the result is shown there. */
+    private suspend fun testConnection() {
+        val worker = engine
+        val session = controller.session
+        val milliseconds = if (worker == null || session.isEmpty()) -1L
+            else withContext(Dispatchers.IO) { runCatching { worker.testConnection(session) }.getOrDefault(-1L) }
+        TunnelState.testResult(if (milliseconds >= 0) "Tunnel DNS round trip: $milliseconds ms" else "The tunnel test did not get an answer")
     }
 
     private fun statsInterval(): Long = if (TunnelState.uiVisible.value) 1000L else 0L
@@ -163,7 +181,13 @@ class ConnectionService : VpnService(), TunnelPlatform {
     override val engineReady: Boolean get() = engine != null
     override var status: ConnectionStatus
         get() = TunnelState.status.value
-        set(value) = TunnelState.status(value)
+        set(value) {
+            val old = TunnelState.status.value
+            TunnelState.status(value)
+            // The tile shows state only; refresh it when that changes.
+            if (old.stage != value.stage || old.running != value.running)
+                runCatching { TileService.requestListeningState(this, ComponentName(this, TunnelTileService::class.java)) }
+        }
 
     override fun now(): Long = System.currentTimeMillis()
     override fun vpnPermissionMissing(): Boolean = prepare(this) != null
@@ -236,6 +260,7 @@ class ConnectionService : VpnService(), TunnelPlatform {
             }
             require(servers.isNotEmpty()) { "OpenVPN needs a DNS server in an assigned address family. Configure dhcp-option DNS or server-pushed DNS." }
             servers.forEach { builder.addDnsServer(it) }
+            configuration.optJSONArray("domains")?.let { domains -> (0 until domains.length()).forEach { builder.addSearchDomain(domains.getString(it)) } }
         } else builder.addDnsServer("198.18.0.2")
         val routed = routedApplications(selected.includedApps) { name ->
             runCatching { packageManager.getApplicationInfo(name, PackageManager.ApplicationInfoFlags.of(0)) }.isSuccess
@@ -284,6 +309,12 @@ class ConnectionService : VpnService(), TunnelPlatform {
     }
 
     override fun log(message: String) = TunnelState.log(message)
+    override fun notice(message: String?) = TunnelState.notice(message)
+    override fun challenge(prompt: String?) {
+        TunnelState.challenge(prompt?.let { runCatching { JSONObject(it) }.getOrNull() }?.let {
+            TunnelState.Challenge(Redactor.redactIdentifiers(it.optString("text").take(512)), it.optBoolean("echo"))
+        })
+    }
     override fun notify(message: String) {
         getSystemService(android.app.NotificationManager::class.java).notify(1, notification(message))
     }

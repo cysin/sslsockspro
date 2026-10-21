@@ -8,5 +8,9 @@ interface IEngineService {
     oneway void networkChanged(String sessionId, boolean sameNetwork);
     /** Traffic reports; zero pauses them while no screen shows the counters. */
     oneway void setStatsInterval(String sessionId, long milliseconds);
+    /** Round trip of one DNS query through the tunnel in milliseconds, or -1. */
+    long testConnection(String sessionId);
+    /** The user's answer to an OpenVPN static or dynamic challenge. */
+    oneway void answerChallenge(String sessionId, String response);
     String versions();
 }

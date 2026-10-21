@@ -130,6 +130,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingImport = plan
     }
 
+    /** Files from another app: only whole profiles, always confirmed. */
+    fun importShared(files: Map<String, ByteArray>) = perform("Could not import files") {
+        if (files.isEmpty()) return@perform
+        val plan = withContext(Dispatchers.IO) { PackageImporter.plan(files) }
+        require(plan.profiles.isNotEmpty()) { "The shared files contain no client configuration. To add credentials, open a profile and attach them there." }
+        pendingImport = plan
+    }
+
     fun confirmImport() = perform("Could not import files") {
         val plan = pendingImport ?: return@perform
         pendingImport = null

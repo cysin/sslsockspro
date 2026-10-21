@@ -80,6 +80,8 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
         reconnectJob?.cancel()
         if (session.isNotEmpty()) platform.stopEngine(session)
         session = UUID.randomUUID().toString()
+        platform.notice(null)
+        platform.challenge(null)
         val requestSession = session
         try {
             val selected = platform.profile(id) ?: error("Profile no longer exists")
@@ -144,6 +146,12 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
     fun engineEvent(code: Int, detail: String, sessionId: String) {
         if (!accepts(sessionId)) return
         if (code == EngineEvent.LOG) { platform.log(detail); return }
+        if (code == EngineEvent.NOTICE) { platform.log(detail); platform.notice(detail); return }
+        if (code == EngineEvent.CHALLENGE) {
+            platform.challenge(detail)
+            state(platform.status.stage, EngineEvent.message(code, detail, profile?.mode))
+            return
+        }
         // Keep the first actionable configuration/authentication error.
         // Native shutdown can emit generic errors afterward.
         if (permanentFailure) return
@@ -275,6 +283,7 @@ class TunnelController(private val platform: TunnelPlatform, private val scope: 
 
     fun destroyed() {
         intentionalStop = true
+        platform.challenge(null)
         networkJob?.cancel()
         platform.stopEngine(session)
         platform.unbindEngine()

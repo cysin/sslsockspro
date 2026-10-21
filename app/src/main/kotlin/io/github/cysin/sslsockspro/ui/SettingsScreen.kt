@@ -25,6 +25,12 @@ internal fun SettingsScreen(ui: MainViewModel, padding: PaddingValues, onRestore
             Text("Reconnect after network failures", Modifier.weight(1f))
             Switch(settings.reconnect, onCheckedChange = { enabled -> ui.updateSettings { it.copy(reconnect = enabled) } })
         }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Start the selected local proxy after the phone restarts", Modifier.weight(1f))
+            Switch(settings.bootStartLocalProxy, onCheckedChange = { enabled -> ui.updateSettings { it.copy(bootStartLocalProxy = enabled) } })
+        }
+        Text("VPN profiles start at boot through Android's always-on VPN setting instead, which also blocks traffic until the tunnel is ready.",
+            style = MaterialTheme.typography.bodySmall)
         Text("Appearance", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("System" to null, "Light" to false, "Dark" to true).forEach { (label, value) ->

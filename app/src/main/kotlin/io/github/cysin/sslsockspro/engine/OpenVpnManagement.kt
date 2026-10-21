@@ -28,7 +28,15 @@ class OpenVpnManagement(
 ) : AutoCloseable {
     private val socket = LocalSocket()
     private val descriptors = ArrayDeque<FileDescriptor>()
-    private val network = JSONObject().put("mtu", 1500).put("dns", JSONArray())
+    private val network = JSONObject().put("mtu", 1500).put("dns", JSONArray()).put("domains", JSONArray())
+    /** A static challenge combines the user's code with the saved password; a
+     * dynamic (CRV1) challenge answers the server's state on the next request. */
+    private sealed interface Challenge
+    private class StaticChallenge(val concatenate: Boolean) : Challenge
+    private class DynamicChallenge(val state: String, val username: String) : Challenge
+    private var challenge: Challenge? = null
+    private var answer: String? = null
+    private var awaitingAuth = false
     @Volatile private var running = true
     private var thread: Thread? = null
     private val holds = Executors.newSingleThreadScheduledExecutor { task -> Thread(task, "openvpn-backoff").apply { isDaemon = true } }
@@ -89,19 +97,7 @@ class OpenVpnManagement(
                 val values = line.substringAfter(':').split(',')
                 if (values.size == 2) callback.traffic(values[0].toLong(), values[1].toLong(), session)
             }
-            line.startsWith(">PASSWORD:") -> {
-                if (line.contains("Verification Failed")) {
-                    callback.event(EngineEvent.AUTH_REJECTED, "", session)
-                    command("signal SIGTERM\n")
-                    return
-                }
-                val name = line.substringAfter('\'').substringBefore('\'')
-                if (name == "Auth" && profile.openVpnUsername.isNotBlank()) {
-                    command("username \"Auth\" ${quoted(profile.openVpnUsername)}\npassword \"Auth\" ${quoted(profile.openVpnPassword)}\n")
-                } else if (name in setOf("Private Key", "PKCS#12") && profile.openVpnKeyPassphrase.isNotBlank()) {
-                    command("password ${quoted(name)} ${quoted(profile.openVpnKeyPassphrase)}\n")
-                } else callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session)
-            }
+            line.startsWith(">PASSWORD:") -> password(line)
             // After network-change, OpenVPN may hand back its socket so it can
             // be protected and bound to the new network.
             line.startsWith("PROTECTFD:") -> descriptors.pollFirst()?.let { descriptor ->
@@ -109,6 +105,61 @@ class OpenVpnManagement(
             }
             line.startsWith(">FATAL:") -> callback.event(EngineEvent.OPENVPN_FATAL, "", session)
         }
+    }
+
+    @Synchronized private fun password(line: String) {
+        if (line.contains("Verification Failed")) {
+            val dynamic = dynamicChallenge(line)
+            if (dynamic == null) {
+                callback.event(EngineEvent.AUTH_REJECTED, "", session)
+                command("signal SIGTERM\n")
+                return
+            }
+            challenge = DynamicChallenge(dynamic.state, dynamic.username)
+            answer = null
+            // auth-retry interact asks for credentials again after this.
+            if (dynamic.responseRequired) callback.event(EngineEvent.CHALLENGE, prompt(dynamic.text, dynamic.echo), session) else answer = ""
+            return
+        }
+        val name = line.substringAfter('\'').substringBefore('\'')
+        val static = staticChallenge(line)
+        when {
+            name == "Auth" && challenge is DynamicChallenge -> { awaitingAuth = true; respond() }
+            name == "Auth" && static != null && profile.openVpnUsername.isNotBlank() -> {
+                challenge = StaticChallenge(static.first and 2 != 0)
+                answer = null
+                awaitingAuth = true
+                callback.event(EngineEvent.CHALLENGE, prompt(static.second, static.first and 1 != 0), session)
+            }
+            name == "Auth" && profile.openVpnUsername.isNotBlank() ->
+                command("username \"Auth\" ${quoted(profile.openVpnUsername)}\npassword \"Auth\" ${quoted(profile.openVpnPassword)}\n")
+            name in setOf("Private Key", "PKCS#12") && profile.openVpnKeyPassphrase.isNotBlank() ->
+                command("password ${quoted(name)} ${quoted(profile.openVpnKeyPassphrase)}\n")
+            else -> callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session)
+        }
+    }
+
+    private fun prompt(text: String, echo: Boolean) = JSONObject().put("text", text.take(512)).put("echo", echo).toString()
+
+    /** From the owner, on a Binder thread. */
+    @Synchronized fun answerChallenge(response: String) {
+        if (!running || challenge == null) return
+        answer = response
+        respond()
+    }
+
+    /** Sends credentials once both OpenVPN's request and the answer exist. */
+    private fun respond() {
+        val response = answer ?: return
+        if (!awaitingAuth) return
+        val credentials = when (val current = challenge) {
+            is StaticChallenge -> profile.openVpnUsername to staticPassword(profile.openVpnPassword, response, current.concatenate)
+            is DynamicChallenge -> current.username to "CRV1::${current.state}::$response"
+            null -> return
+        }
+        challenge = null; answer = null; awaitingAuth = false
+        runCatching { command("username \"Auth\" ${quoted(credentials.first)}\npassword \"Auth\" ${quoted(credentials.second)}\n") }
+            .onFailure { callback.event(EngineEvent.CREDENTIALS_REQUIRED, "", session) }
     }
 
     private fun need(argument: String) {
@@ -152,7 +203,10 @@ class OpenVpnManagement(
                     return
                 }
             }
-            "ROUTE", "ROUTE6", "DNSDOMAIN", "HTTPPROXY" -> Unit
+            // Search domains are harmless; routes are ignored because the VPN
+            // always routes all traffic of covered apps (full tunnel).
+            "DNSDOMAIN" -> if (Regex("[A-Za-z0-9.-]{1,253}").matches(extra)) network.getJSONArray("domains").put(extra)
+            "ROUTE", "ROUTE6", "HTTPPROXY" -> Unit
             else -> response = "cancel"
         }
         command("needok '$name' $response\n")
@@ -184,5 +238,26 @@ class OpenVpnManagement(
     private fun quoted(value: String): String {
         require(value.none { it == '\n' || it == '\r' || it == '\u0000' }) { "Invalid OpenVPN credential" }
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    }
+
+    companion object {
+        /** A server's CRV1 challenge (see OpenVPN's management notes). */
+        internal data class Dynamic(val responseRequired: Boolean, val echo: Boolean, val state: String, val username: String, val text: String)
+
+        internal fun dynamicChallenge(line: String): Dynamic? {
+            val match = Regex("CRV1:([^:]*):([^:]*):([^:]*):(.*?)'?]?$").find(line) ?: return null
+            val username = runCatching { String(java.util.Base64.getDecoder().decode(match.groupValues[3])) }.getOrNull() ?: return null
+            val flags = match.groupValues[1].split(',')
+            return Dynamic("R" in flags, "E" in flags, match.groupValues[2], username, match.groupValues[4])
+        }
+
+        /** (flag, text) from "SC:<flag>,<text>"; flag bit 0 echoes, bit 1 concatenates. */
+        internal fun staticChallenge(line: String): Pair<Int, String>? =
+            Regex(" SC:(\\d+),(.*)$").find(line)?.let { (it.groupValues[1].toIntOrNull() ?: 0) to it.groupValues[2] }
+
+        internal fun staticPassword(password: String, response: String, concatenate: Boolean): String =
+            if (concatenate) password + response
+            else "SCRV1:" + java.util.Base64.getEncoder().encodeToString(password.toByteArray()) + ":" +
+                java.util.Base64.getEncoder().encodeToString(response.toByteArray())
     }
 }

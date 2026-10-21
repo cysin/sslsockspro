@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shortcut and tile labels must be resources; the app is English-only. -->
+    <string name="shortcut_connect_short">Connect</string>
+    <string name="shortcut_connect_long">Connect the selected profile</string>
+    <string name="shortcut_disconnect_short">Disconnect</string>
+    <string name="shortcut_disconnect_long">Disconnect the tunnel</string>
+    <string name="tile_label">SSLSocks Pro</string>
+</resources>

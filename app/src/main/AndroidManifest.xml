@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only for the opt-in "start local proxy after boot" setting. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <queries>
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
     </queries>
@@ -12,14 +14,56 @@
         android:dataExtractionRules="@xml/data_extraction_rules" android:fullBackupContent="false"
         android:label="SSLSocks Pro" android:icon="@drawable/ic_tunnel"
         android:theme="@style/AppTheme" android:supportsRtl="true" android:usesCleartextTraffic="false">
-        <activity android:name=".ui.MainActivity" android:exported="true">
+        <activity android:name=".ui.MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+            <!-- Client packages and backups opened or shared from other apps.
+                 Nothing is saved or connected until the user confirms. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/gzip" />
+                <data android:mimeType="application/x-gzip" />
+                <data android:mimeType="application/x-tar" />
+                <data android:mimeType="application/x-compressed-tar" />
+                <data android:mimeType="application/x-openvpn-profile" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/gzip" />
+                <data android:mimeType="application/x-gzip" />
+                <data android:mimeType="application/x-tar" />
+                <data android:mimeType="application/x-openvpn-profile" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+        <activity android:name=".ui.ShortcutActivity" android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" android:excludeFromRecents="true"
+            android:noHistory="true" android:taskAffinity="" />
         <service android:name=".service.ConnectionService" android:exported="true"
             android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="specialUse">
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-controlled encrypted VPN and local TLS proxy tunnels" />
         </service>
         <service android:name=".engine.EngineService" android:exported="false" android:process=":engine" />
+        <service android:name=".service.TunnelTileService" android:exported="true" android:label="@string/tile_label"
+            android:icon="@drawable/ic_tunnel" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="true" />
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+        <receiver android:name=".service.BootReceiver" android:exported="true">
+            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+        </receiver>
     </application>
 </manifest>

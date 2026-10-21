@@ -9,6 +9,10 @@ object EngineEvent {
     const val LISTENING = 2
     const val CONNECTED = 3
     const val RECONNECTING = 4
+    /** Information for the status screen; not a failure. */
+    const val NOTICE = 5
+    /** OpenVPN asks the user for a code; detail is JSON {"text", "echo"}. */
+    const val CHALLENGE = 6
 
     // Transient failures: the owner keeps the blocking TUN and retries.
     const val ENGINE_STOPPED = 10
@@ -33,6 +37,8 @@ object EngineEvent {
         CONNECTED -> if (mode == ConnectionMode.OPENVPN) "OpenVPN connected; traffic is tunneled"
             else "VPN connected: TCP and DNS tunneled; other UDP blocked"
         RECONNECTING -> "OpenVPN is reconnecting; traffic remains blocked"
+        NOTICE -> detail
+        CHALLENGE -> "OpenVPN asks for a verification code. Open SSLSocks Pro to answer it."
         ENGINE_STOPPED -> "Native network engine stopped; traffic remains blocked"
         HEALTH_FAILED -> "Tunnel health check failed; reconnecting without direct DNS or network fallback"
         DIAGNOSTICS_FAILED -> "Native diagnostics stopped unexpectedly; reconnecting with traffic blocked"

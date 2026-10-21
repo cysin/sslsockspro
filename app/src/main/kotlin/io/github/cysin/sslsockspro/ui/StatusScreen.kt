@@ -26,6 +26,7 @@ import io.github.cysin.sslsockspro.model.ConnectionStage
 import io.github.cysin.sslsockspro.model.TunnelProfile
 import io.github.cysin.sslsockspro.service.ConnectionService
 import io.github.cysin.sslsockspro.service.TunnelState
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun StatusScreen(ui: MainViewModel, padding: PaddingValues, onConnect: (TunnelProfile) -> Unit, onImport: () -> Unit) {
@@ -45,6 +46,9 @@ internal fun StatusScreen(ui: MainViewModel, padding: PaddingValues, onConnect: 
                 Text(stageLabel(status.stage), style = MaterialTheme.typography.titleLarge)
             }
             Text(status.message)
+            if (status.running && status.startedAt > 0) ConnectedFor(status.startedAt)
+            val notice by TunnelState.notice.collectAsStateWithLifecycle()
+            if (status.running) notice?.let { Text(it, color = MaterialTheme.colorScheme.tertiary) }
             if (displayedProfile?.mode == ConnectionMode.PROXY_VPN) Text(
                 if (displayedProfile.proxyIpv6) "IPv4 and IPv6 destinations enabled" else "IPv4 destinations; IPv6 blocked")
             if (displayedProfile != null) {
@@ -76,6 +80,19 @@ internal fun StatusScreen(ui: MainViewModel, padding: PaddingValues, onConnect: 
                 if (days < 30) Text("Client certificate expires ${date(certificate.expires)}. Import its replacement before expiry.", color = MaterialTheme.colorScheme.error)
             }
             TrafficCounters()
+            if (displayedProfile.mode == ConnectionMode.PROXY_VPN && status.stage == ConnectionStage.CONNECTED) {
+                val result by TunnelState.testResult.collectAsStateWithLifecycle()
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = TunnelState::requestTest) { Text("Test connection") }
+                    result?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+            network.transport?.let { Text("Current network: $it", style = MaterialTheme.typography.bodySmall) }
+            val tunnels = ui.tunnels[displayedProfile.id].orEmpty().size
+            if (displayedProfile.mode == ConnectionMode.LOCAL_PROXY) Text(
+                "Local proxy listeners can be used by any app on this phone.", style = MaterialTheme.typography.bodySmall)
+            else if (tunnels > 1 && (displayedProfile.mode != ConnectionMode.OPENVPN || displayedProfile.openVpnViaStunnel)) Text(
+                "Other tunnels in this profile listen on loopback ports that any app on this phone can use.", style = MaterialTheme.typography.bodySmall)
         }
         if (network.captivePortal) {
             Text("This hotspot requires sign-in. Finish sign-in before connecting; the app will not bypass a blocked VPN.", color = MaterialTheme.colorScheme.error)
@@ -93,13 +110,33 @@ internal fun StatusScreen(ui: MainViewModel, padding: PaddingValues, onConnect: 
 @Composable
 private fun TrafficCounters() {
     val status by TunnelState.status.collectAsStateWithLifecycle()
+    var previous by remember { mutableStateOf(Triple(status.bytesSent, status.bytesReceived, System.nanoTime())) }
+    var rates by remember { mutableStateOf(0L to 0L) }
+    LaunchedEffect(status.bytesSent, status.bytesReceived) {
+        val now = System.nanoTime()
+        val seconds = (now - previous.third) / 1_000_000_000.0
+        if (seconds >= 0.5) {
+            rates = ((status.bytesSent - previous.first).coerceAtLeast(0) / seconds).toLong() to
+                ((status.bytesReceived - previous.second).coerceAtLeast(0) / seconds).toLong()
+            previous = Triple(status.bytesSent, status.bytesReceived, now)
+        }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("Sent ${bytes(status.bytesSent)}")
-        Text("Received ${bytes(status.bytesReceived)}")
+        Text("Sent ${bytes(status.bytesSent)} · ${bytes(rates.first)}/s")
+        Text("Received ${bytes(status.bytesReceived)} · ${bytes(rates.second)}/s")
     }
 }
 
-private data class NetworkWarnings(val captivePortal: Boolean = false, val strictPrivateDns: Boolean = false)
+@Composable
+private fun ConnectedFor(startedAt: Long) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(startedAt) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
+    val seconds = ((now - startedAt) / 1000).coerceAtLeast(0)
+    Text("Connected for %d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60), style = MaterialTheme.typography.bodyMedium)
+}
+
+/** [transport] names the kind of network only, never its SSID. */
+private data class NetworkWarnings(val captivePortal: Boolean = false, val strictPrivateDns: Boolean = false, val transport: String? = null)
 
 /** Reads capabilities only; no SSID or location data is requested. */
 @Composable
@@ -113,9 +150,17 @@ private fun rememberPhysicalNetworkWarnings(): NetworkWarnings {
                 manager.getNetworkCapabilities(network)?.let { !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
                     it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } == true
             }
+            val preferred = networks.sortedByDescending { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true }
+                .firstOrNull()?.let(manager::getNetworkCapabilities)
             warnings = NetworkWarnings(
                 captivePortal = networks.any { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true },
-                strictPrivateDns = networks.any { !manager.getLinkProperties(it)?.privateDnsServerName.isNullOrBlank() })
+                strictPrivateDns = networks.any { !manager.getLinkProperties(it)?.privateDnsServerName.isNullOrBlank() },
+                transport = preferred?.let { capabilities -> when {
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile data"
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+                    else -> "Other"
+                } })
         }
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { update() }

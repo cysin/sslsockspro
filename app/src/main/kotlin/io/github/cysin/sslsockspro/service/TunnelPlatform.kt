@@ -52,6 +52,10 @@ interface TunnelPlatform {
     fun engineNetworkChanged(session: String, sameNetwork: Boolean)
 
     fun log(message: String)
+    /** Connection information for the status screen; null clears it. */
+    fun notice(message: String?)
+    /** An OpenVPN challenge prompt (JSON from the worker); null clears it. */
+    fun challenge(prompt: String?)
     fun notify(message: String)
     /** Leave the foreground and stop the owner service. */
     fun stopService()

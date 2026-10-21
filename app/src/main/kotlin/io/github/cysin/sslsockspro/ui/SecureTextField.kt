@@ -39,6 +39,7 @@ internal fun SecureTextField(
     number: Boolean = false,
     lines: Int = 1,
     supportingText: String? = null,
+    error: String? = null,
 ) {
     val latest by rememberUpdatedState(onValueChange)
     val colors = MaterialTheme.colorScheme
@@ -86,6 +87,6 @@ internal fun SecureTextField(
             field.setHintTextColor(hintColor)
             field.backgroundTintList = ColorStateList.valueOf(accent)
         })
-        supportingText?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+        (error ?: supportingText)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (error != null) colors.error else colors.onSurfaceVariant) }
     }
 }

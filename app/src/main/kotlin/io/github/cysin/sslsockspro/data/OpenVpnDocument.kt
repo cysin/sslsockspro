@@ -22,7 +22,7 @@ object OpenVpnDocument {
         "push-peer-info")
     private val owned = setOf("dev", "dev-type", "route-noexec", "ifconfig-noexec", "persist-tun",
         "management-hold", "management-query-passwords", "management-signal", "verb", "mute",
-        "suppress-timestamps", "auth-nocache")
+        "suppress-timestamps", "auth-nocache", "auth-retry")
     private val fileOptions = setOf("ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2", "pkcs12",
         "crl-verify", "auth-user-pass", "extra-certs")
     private val inlineOptions = fileOptions - "crl-verify" + "peer-fingerprint"
@@ -181,8 +181,10 @@ object OpenVpnDocument {
                 else -> result.append(line.raw).append('\n')
             }
         }
+        // auth-retry interact lets a server's dynamic (CRV1) challenge ask for
+        // credentials again; plain rejections still end the connection.
         result.append("\ndev tun\ndev-type tun\nmanagement ").append(quoted(managementSocket))
-            .append(" unix\nmanagement-query-passwords\nmanagement-hold\nmanagement-signal\nverb 3\nallow-compression no\n")
+            .append(" unix\nmanagement-query-passwords\nmanagement-hold\nmanagement-signal\nauth-retry interact\nverb 3\nallow-compression no\n")
         if (parsed.none { it.key == "remote-cert-tls" }) result.append("remote-cert-tls server\n")
         if (parsed.none { it.key == "tls-version-min" }) result.append(if (hidesCertificate(parsed)) "tls-version-min 1.2\n" else "tls-version-min 1.3\n")
         return result.toString()

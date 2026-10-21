@@ -1,7 +1,5 @@
 package io.github.cysin.sslsockspro.ui
 
-import android.content.Intent
-import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -11,7 +9,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -28,13 +25,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Base64
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> Unit, onImport: () -> Unit,
                            onDismiss: () -> Unit, onSave: (TunnelProfile) -> Unit) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val document = remember(profile.config) { runCatching { StunnelDocument.parse(profile.config) }.getOrNull() }
     val section = profile.selectedSection.takeIf { it in document?.sections.orEmpty() } ?: document?.sections?.firstOrNull().orEmpty()
@@ -47,11 +42,6 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
     var unlockFile by remember { mutableStateOf<String?>(null) }
     var keyPassword by remember { mutableStateOf("") }
     var unlocking by remember { mutableStateOf(false) }
-    val apps = remember {
-        context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
-            PackageManager.ResolveInfoFlags.of(0)).map { it.activityInfo.packageName to it.loadLabel(context.packageManager).toString() }
-            .distinctBy { it.first }.sortedBy { it.second.lowercase() }
-    }
     fun save() {
         try {
             require(profile.name.isNotBlank()) { "Profile name is required" }
@@ -162,7 +152,8 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
                             Checkbox(profile.proxyIpv6, { onChange(profile.copy(proxyIpv6 = it)) }); Text("Enable IPv6 destinations")
                         }
                         Text("Enable only when the proxy exit can reach IPv6 sites. When disabled, Android blocks IPv6 and apps use IPv4; there is no direct IPv6 fallback.")
-                        SecureTextField(profile.dnsEndpoint, { onChange(profile.copy(dnsEndpoint = it)) }, "DNS-over-HTTPS endpoint", Modifier.fillMaxWidth())
+                        SecureTextField(profile.dnsEndpoint, { onChange(profile.copy(dnsEndpoint = it)) }, "DNS-over-HTTPS endpoint", Modifier.fillMaxWidth(),
+                            error = if (Regex("https://[^\\s/@]+(:\\d+)?(/\\S*)?").matches(profile.dnsEndpoint)) null else "Use an https:// address without credentials")
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(profile.suppressServiceBindings, { onChange(profile.copy(suppressServiceBindings = it)) }); Text("Suppress DNS SVCB/HTTPS (64/65)")
                         }
@@ -175,27 +166,7 @@ internal fun ProfileEditor(profile: TunnelProfile, onChange: (TunnelProfile) -> 
             }
         }
     }
-    if (appPicker) AlertDialog(onDismissRequest = { appPicker = false }, title = { Text("Choose VPN coverage") }, text = {
-        val selectedApps = profile.includedApps.toSet()
-        val choices = remember(apps, selectedApps) {
-            val knownPackages = apps.map { it.first }.toSet()
-            (apps + selectedApps.filterNot { it in knownPackages }.map { it to it })
-                .sortedWith(compareByDescending<Pair<String, String>> { it.first in selectedApps }
-                    .thenBy { it.second.lowercase(Locale.ROOT) }.thenBy { it.first })
-        }
-        Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
-            TextButton(onClick = { onChange(profile.copy(includedApps = emptyList())); appPicker = false }) { Text("Route all apps") }
-            choices.forEach { (id, label) ->
-                key(id) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(id in selectedApps, { enabled -> onChange(profile.copy(includedApps =
-                            if (enabled) (profile.includedApps + id).distinct() else profile.includedApps - id)) })
-                        Column { Text(label); Text(id, style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
-            }
-        }
-    }, confirmButton = { TextButton(onClick = { appPicker = false }) { Text("Done") } })
+    if (appPicker) AppPicker(profile.includedApps, { onChange(profile.copy(includedApps = it)) }, { appPicker = false })
     unlockFile?.let { name ->
         AlertDialog(onDismissRequest = { if (!unlocking) { unlockFile = null; keyPassword = "" } }, title = { Text("Unlock $name") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -249,10 +220,11 @@ private fun BasicTunnelFields(document: StunnelDocument, section: String, mode: 
         lookup?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        SecureTextField(port, { port = it; onChange(document.updated(section, "connect", endpoint())) }, "Server port", Modifier.weight(1f), number = true)
+        SecureTextField(port, { port = it; onChange(document.updated(section, "connect", endpoint())) }, "Server port", Modifier.weight(1f), number = true,
+            error = if (port.toIntOrNull() in 1..65535) null else "Use 1–65535")
         SecureTextField(localPort, { localPort = it; onChange(document.updated(section, "accept",
             if (listener.host.contains(':')) "[" + listener.host + "]:" + it else listener.host + ":" + it)) },
-            "Local port", Modifier.weight(1f), number = true)
+            "Local port", Modifier.weight(1f), number = true, error = if (localPort.toIntOrNull() in 1024..65535) null else "Use 1024–65535")
     }
     if (mode != ConnectionMode.LOCAL_PROXY) Text("VPN modes reach this tunnel through a private per-connection endpoint that only this app can use; the local port applies to Local proxy mode.",
         style = MaterialTheme.typography.bodySmall)

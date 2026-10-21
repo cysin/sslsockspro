@@ -111,6 +111,14 @@ class EngineService : Service() {
             statsInterval = milliseconds.coerceIn(0, 60_000)
             active?.takeIf { it.id == sessionId }?.statsIntervalMs = statsInterval
         }
+        override fun testConnection(sessionId: String): Long {
+            check(Binder.getCallingUid() == Process.myUid())
+            return active?.takeIf { it.id == sessionId }?.test() ?: -1
+        }
+        override fun answerChallenge(sessionId: String, response: String) {
+            check(Binder.getCallingUid() == Process.myUid())
+            active?.takeIf { it.id == sessionId }?.answerChallenge(response)
+        }
         override fun versions(): String {
             check(Binder.getCallingUid() == Process.myUid())
             return assets.open("native-versions.json").bufferedReader().use { it.readText() }
@@ -343,8 +351,8 @@ class EngineService : Service() {
          * otherwise; positive identifications are remembered per profile. */
         private fun backend(profile: TunnelProfile, upstream: Endpoint): ProxyKind {
             val detected = detectedBackends[profile.id] ?: BackendProbe.detect(upstream)?.also { detectedBackends[profile.id] = it }
-            if (detected != null && detected != profile.proxyKind) log(
-                "The server answered as ${if (detected == ProxyKind.SOCKS5) "SOCKS5" else "HTTP CONNECT"}; using it for this connection. Update the profile's backend type.")
+            if (detected != null && detected != profile.proxyKind) runCatching { callback.event(EngineEvent.NOTICE,
+                "The server answered as ${if (detected == ProxyKind.SOCKS5) "SOCKS5" else "HTTP CONNECT"}; using it for this connection. Update the profile's backend type.", id) }
             return detected ?: profile.proxyKind
         }
 
@@ -443,6 +451,15 @@ class EngineService : Service() {
                     lines.dropLast(1).forEach(::nativeLine)
                 }
             }
+        }
+
+        fun answerChallenge(response: String) { management?.answerChallenge(response) }
+
+        /** Times one DoH query through the whole tunnel. */
+        fun test(): Long {
+            val resolver = dns ?: return -1
+            val started = System.nanoTime()
+            return runCatching { probe(resolver); TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) }.getOrDefault(-1)
         }
 
         /** Sockets bound to the previous network fail; pooled DoH connections
