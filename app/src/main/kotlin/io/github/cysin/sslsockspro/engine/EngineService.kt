@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import io.github.cysin.sslsockspro.TunnelApplication
+import io.github.cysin.sslsockspro.config.GatewayPlan
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
@@ -23,7 +24,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
-import org.json.JSONObject
 import org.xbill.DNS.DClass
 import org.xbill.DNS.Message
 import org.xbill.DNS.Name
@@ -60,7 +60,7 @@ class EngineService : Service() {
                     try {
                         val profile = (application as TunnelApplication).profiles.read().profiles.firstOrNull { it.id == profileId }
                             ?: throw IllegalArgumentException("Profile was removed")
-                        runtime.start(profile, JSONObject(resolvedGateways))
+                        runtime.start(profile, GatewayPlan.decode(resolvedGateways))
                     } catch (failure: Exception) {
                         val cancelled = requestedSession != sessionId || !runtime.isRunning
                         runtime.close()
@@ -133,11 +133,14 @@ class EngineService : Service() {
         private var watchdog: Job? = null
         private var managementPath: File? = null
         private var logOffset = 0L
+        private var partialLogLine = ""
+        private val nativeLog = LogLimiter()
+        private var healthFailures = 0
         private var nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
         private var nextDiagnostics = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         val isRunning get() = running
 
-        fun start(profile: TunnelProfile, gateways: JSONObject) {
+        fun start(profile: TunnelProfile, gateways: GatewayPlan) {
             startingThread = Thread.currentThread()
             try { startEngines(profile, gateways) }
             finally { startingThread = null; Thread.interrupted() }
@@ -145,15 +148,15 @@ class EngineService : Service() {
 
         private fun checkRunning() { if (!running) throw InterruptedException("Connection was cancelled") }
 
-        private fun startEngines(profile: TunnelProfile, gateways: JSONObject) {
+        private fun startEngines(profile: TunnelProfile, gateways: GatewayPlan) {
             checkRunning()
             require(id.matches(Regex("[a-fA-F0-9-]{36}")))
             directory.mkdirs()
             val credentialPath = Credentials.materialize(profile, directory)
-            val hosts = gateways.keys().asSequence().filter { it != "allowed" }.associateWith { gateways.getString(it) }
+            val hosts = gateways.hosts
             broker = ProtectionBroker(callback, id)
             checkRunning()
-            val allowed = gateways.getJSONArray("allowed").let { array -> (0 until array.length()).joinToString(",") { array.getString(it) } }
+            val allowed = gateways.allowed.joinToString(",")
             var document: StunnelDocument? = null
             if (profile.mode != ConnectionMode.OPENVPN || profile.openVpnViaStunnel) {
                 document = StunnelDocument.parse(profile.config)
@@ -245,11 +248,19 @@ class EngineService : Service() {
                         log(relay!!.diagnostics())
                     }
                     if (profile.mode == ConnectionMode.PROXY_VPN && System.nanoTime() >= nextHealthCheck) {
-                        nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-                        try { probe(dns!!) }
-                        catch (_: Exception) {
-                            if (running) runCatching { callback.status("ERROR", "Tunnel health check failed; reconnecting without direct DNS or network fallback", id) }
-                            break
+                        // One slow or failed DoH answer must not tear down every
+                        // app connection; three consecutive failures do.
+                        try {
+                            probe(dns!!)
+                            healthFailures = 0
+                            nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                        } catch (_: Exception) {
+                            if (++healthFailures >= HEALTH_FAILURES) {
+                                if (running) runCatching { callback.status("ERROR", "Tunnel health check failed; reconnecting without direct DNS or network fallback", id) }
+                                break
+                            }
+                            log("Tunnel health check failed ($healthFailures/$HEALTH_FAILURES); checking again shortly")
+                            nextHealthCheck = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                         }
                     }
                 }
@@ -278,13 +289,12 @@ class EngineService : Service() {
             val child = builder.start()
             scope.launch(Dispatchers.IO) {
                 try { child.inputStream.bufferedReader().use { reader ->
-                    var lines = 0
                     val line = StringBuilder()
                     while (running) {
                         val character = reader.read()
                         if (character < 0) break
                         if (character == '\n'.code) {
-                            if (++lines <= 200) log(line.toString())
+                            nativeLine(line.toString())
                             line.clear()
                         } else if (line.length < 2048) line.append(character.toChar())
                     }
@@ -317,6 +327,10 @@ class EngineService : Service() {
             }
         }
 
+        private fun nativeLine(line: String) {
+            if (line.isNotBlank()) nativeLog.admit(line).forEach(::log)
+        }
+
         private fun log(message: String) {
             if (!message.contains("PRIVATE KEY") && !message.contains("password", true))
                 runCatching { callback.status("LOG", message.take(1024), id) }
@@ -327,12 +341,16 @@ class EngineService : Service() {
             if (!file.isFile) return
             runCatching {
                 java.io.RandomAccessFile(file, "r").use { input ->
-                    if (input.length() < logOffset) logOffset = 0
+                    if (input.length() < logOffset) { logOffset = 0; partialLogLine = "" }
                     input.seek(logOffset)
-                    val buffer = ByteArray(minOf(16384L, input.length() - logOffset).toInt())
+                    val buffer = ByteArray(minOf(65536L, input.length() - logOffset).toInt())
                     input.readFully(buffer)
                     logOffset += buffer.size
-                    buffer.toString(Charsets.UTF_8).lineSequence().filter(String::isNotBlank).take(64).forEach(::log)
+                    // Keep an unfinished last line for the next read; the
+                    // limiter, not truncation, bounds what reaches the UI.
+                    val lines = (partialLogLine + buffer.toString(Charsets.UTF_8)).split('\n')
+                    partialLogLine = lines.last().take(2048)
+                    lines.dropLast(1).forEach(::nativeLine)
                 }
             }
         }
@@ -366,6 +384,7 @@ class EngineService : Service() {
     }
 
     companion object {
+        private const val HEALTH_FAILURES = 3
         // Android may recreate a bound service before its previous async
         // cleanup finishes. All instances serialize native startup/cleanup on
         // one process executor, including the global packet-engine JNI state.

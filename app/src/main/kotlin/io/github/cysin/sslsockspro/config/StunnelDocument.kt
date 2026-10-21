@@ -82,7 +82,9 @@ class StunnelDocument private constructor(val lines: List<ConfigLine>) {
         }
     }
 
-    fun renderRuntime(runtimeDirectory: String, credentialPath: (String) -> String, resolvedHosts: Map<String, String> = emptyMap()): String {
+    /** [resolvedHosts] maps gateway names to addresses in preference order;
+     * every address becomes a `connect` line so stunnel can fail over. */
+    fun renderRuntime(runtimeDirectory: String, credentialPath: (String) -> String, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
         validate()
         val output = StringBuilder("foreground = yes\nsyslog = no\ndebug = warning\npid = $runtimeDirectory/stunnel.pid\noutput = $runtimeDirectory/stunnel.log\n")
         for (line in lines) {
@@ -91,7 +93,8 @@ class StunnelDocument private constructor(val lines: List<ConfigLine>) {
                 line.key in FILE_OPTIONS -> output.append(line.key).append(" = ").append(credentialPath(line.value.orEmpty())).append('\n')
                 line.key == "connect" -> {
                     val endpoint = Endpoint.parse(line.value.orEmpty())
-                    output.append("connect = ").append(endpoint.copy(host = resolvedHosts[endpoint.host] ?: endpoint.host)).append('\n')
+                    for (address in resolvedHosts[endpoint.host] ?: listOf(endpoint.host))
+                        output.append("connect = ").append(endpoint.copy(host = address)).append('\n')
                 }
                 line.key == "accept" -> output.append("accept = ").append(Endpoint.parse(line.value.orEmpty(), true)).append('\n')
                 else -> output.append(line.raw).append('\n')

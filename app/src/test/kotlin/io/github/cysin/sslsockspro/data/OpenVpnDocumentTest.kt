@@ -8,7 +8,7 @@ class OpenVpnDocumentTest {
     @Test fun connectionBlocksAndInlineKeysStayIntact() {
         OpenVpnDocument.validate(profile)
         val text = OpenVpnDocument.runtime(profile, { "/private/" + Credentials.referenceName(it) }, "/private/control.sock", null,
-            mapOf("vpn.example" to "192.0.2.1"))
+            mapOf("vpn.example" to listOf("192.0.2.1", "2001:db8::1")))
         assertTrue(text.contains("<connection>\nremote \"192.0.2.1\" \"1194\" \"udp\"\n</connection>"))
         assertTrue(text.contains("<key>\nprivate-key-payload\n</key>"))
         assertTrue(text.contains("ca \"/private/trust bundle.pem\""))
@@ -40,5 +40,11 @@ class OpenVpnDocumentTest {
         }
         assertThrows(IllegalArgumentException::class.java) { OpenVpnDocument.validate(profile + "<connection>") }
         assertThrows(IllegalArgumentException::class.java) { OpenVpnDocument.validate("remote server 1194\n") }
+    }
+    @Test fun topLevelRemotesExpandToEveryResolvedGatewayAddress() {
+        val text = OpenVpnDocument.runtime("client\nca ca.pem\nremote vpn.example 443 tcp\n", { "/private/ca.pem" }, "/private/control.sock", null,
+            mapOf("vpn.example" to listOf("192.0.2.1", "2001:db8::1")))
+        assertTrue(text.contains("remote \"192.0.2.1\" \"443\" \"tcp\"\nremote \"2001:db8::1\" \"443\" \"tcp\"\n"))
+        assertFalse(text.contains("vpn.example"))
     }
 }

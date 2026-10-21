@@ -59,4 +59,22 @@ class StunnelDocumentTest {
         assertEquals("::1", document.listener("socks").host)
         assertEquals(9984, document.remotes("socks").first().port)
     }
+
+    @Test fun resolvedGatewayAddressesBecomeOrderedFailoverConnections() {
+        val document = StunnelDocument.parse(StunnelDocument.template("gateway.example"))
+        val runtime = document.renderRuntime("/runtime", { "/private/$it" }, mapOf("gateway.example" to listOf("192.0.2.1", "2001:db8::1")))
+        assertTrue(runtime.contains("connect = 192.0.2.1:9983\nconnect = [2001:db8::1]:9983\n"))
+        assertFalse(runtime.contains("gateway.example"))
+    }
+
+    @Test fun gatewayPlansKeepPreferredAddressesAndAllowOnlyResolvedPeers() {
+        val plan = GatewayPlan.create(listOf(Endpoint("gateway.example", 9983), Endpoint("gateway.example", 9984), Endpoint("192.0.2.9", 443))) { host ->
+            if (host == "gateway.example") listOf("fe80::1%wlan0", "192.0.2.1", "192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4") else listOf(host)
+        }
+        assertEquals(listOf("fe80::1", "192.0.2.1", "192.0.2.2", "192.0.2.3"), plan.hosts["gateway.example"])
+        assertTrue("fe80::1|9984" in plan.allowed && "192.0.2.3|9983" in plan.allowed && "192.0.2.9|443" in plan.allowed)
+        assertFalse(plan.allowed.any { it.startsWith("192.0.2.4") })
+        assertEquals(plan, GatewayPlan.decode(plan.encode()))
+        assertThrows(IllegalArgumentException::class.java) { GatewayPlan.create(listOf(Endpoint("missing.example", 1))) { emptyList() } }
+    }
 }

@@ -10,7 +10,13 @@ import org.bouncycastle.asn1.x509.KeyPurposeId
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.openssl.PKCS8Generator
+import org.bouncycastle.openssl.jcajce.JcaMiscPEMGenerator
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter
+import org.bouncycastle.openssl.jcajce.JcaPKCS8Generator
+import org.bouncycastle.openssl.jcajce.JceOpenSSLPKCS8EncryptorBuilder
+import org.bouncycastle.openssl.jcajce.JcePEMEncryptorBuilder
+import org.bouncycastle.util.io.pem.PemWriter
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.bouncycastle.util.io.pem.PemObject
 import org.junit.Assert.*
@@ -44,14 +50,24 @@ class CredentialsTest {
         } }
         return Base64.getEncoder().encodeToString(text.toString().toByteArray())
     }
-    private fun profile(expired: Boolean = false, mismatch: Boolean = false, serverOnly: Boolean = false, caAsIdentity: Boolean = false): TunnelProfile {
+    private fun profile(expired: Boolean = false, mismatch: Boolean = false, serverOnly: Boolean = false, caAsIdentity: Boolean = false,
+                        client: KeyPair = key(), other: () -> KeyPair = ::key): TunnelProfile {
         val authority = key()
-        val client = key()
         val ca = certificate(authority, authority, true)
         val leaf = certificate(client, authority, false, expired, serverOnly)
         return TunnelProfile(name = "fixture", config = StunnelDocument.template("192.0.2.1"), files = mapOf(
             "server-ca.crt" to pem(ca), "client.pem" to pem(if (caAsIdentity) ca else leaf, ca,
-                if (mismatch) key().private else if (caAsIdentity) authority.private else client.private)))
+                if (mismatch) other().private else if (caAsIdentity) authority.private else client.private)))
+    }
+    private fun encrypted(key: PrivateKey, password: String, pkcs8: Boolean): ByteArray {
+        val text = StringWriter()
+        PemWriter(text).use { writer ->
+            writer.writeObject(if (pkcs8) JcaPKCS8Generator(key, JceOpenSSLPKCS8EncryptorBuilder(PKCS8Generator.AES_256_CBC)
+                .setProvider(provider).setPRF(PKCS8Generator.PRF_HMACSHA256).setIterationCount(2048)
+                .setPassword(password.toCharArray()).build()).generate()
+                else JcaMiscPEMGenerator(key, JcePEMEncryptorBuilder("AES-256-CBC").setProvider(provider).build(password.toCharArray())).generate())
+        }
+        return text.toString().toByteArray()
     }
     @Test fun matchingClientIdentityAndCaAreAccepted() {
         val profile = profile()
@@ -67,5 +83,24 @@ class CredentialsTest {
     @Test fun ServerRoleOrCaCannotBeUsedAsClientIdentity() {
         assertThrows(IllegalArgumentException::class.java) { Credentials.validate(profile(serverOnly = true)) }
         assertThrows(IllegalArgumentException::class.java) { Credentials.validate(profile(caAsIdentity = true)) }
+    }
+    @Test fun rsaAndEd25519IdentitiesAreMatchedWithoutPlatformProviders() {
+        for (algorithm in listOf("RSA", "Ed25519")) {
+            val generate = { KeyPairGenerator.getInstance(algorithm).generateKeyPair() }
+            Credentials.validate(profile(client = generate()))
+            assertThrows(IllegalArgumentException::class.java) { Credentials.validate(profile(client = generate(), mismatch = true, other = generate)) }
+        }
+    }
+    @Test fun encryptedPemAndPkcs8KeysUnlockOnlyWithTheirPassphrase() {
+        for (pkcs8 in listOf(false, true)) {
+            val pair = key()
+            val locked = encrypted(pair.private, "correct horse battery", pkcs8)
+            assertThrows(IllegalArgumentException::class.java) { Credentials.privateKeyInfo(locked) }
+            assertThrows(IllegalArgumentException::class.java) { Credentials.normalizeIdentity(locked, "wrong passphrase".toCharArray()) }
+            val unlocked = Credentials.privateKeyInfo(Credentials.normalizeIdentity(locked, "correct horse battery".toCharArray()))
+            // SEC1 and PKCS#8 encodings differ in optional fields; the scalar must not.
+            assertEquals((pair.private as java.security.interfaces.ECPrivateKey).s,
+                org.bouncycastle.asn1.sec.ECPrivateKey.getInstance(unlocked.parsePrivateKey()).key)
+        }
     }
 }

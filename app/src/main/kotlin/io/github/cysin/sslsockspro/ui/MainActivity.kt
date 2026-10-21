@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -82,6 +83,8 @@ private fun TunnelApp() {
     var pendingRestore by ui.pendingRestore
     var pendingExport by ui.pendingExport
     var pendingNotification by ui.pendingNotification
+    // Only the profile ID is saved across recreation, never its credentials.
+    var deleteCandidate by rememberSaveable { mutableStateOf<String?>(null) }
     val status by TunnelState.status.collectAsStateWithLifecycle()
     val logs by TunnelState.logs.collectAsStateWithLifecycle()
     val selected = backup.profiles.firstOrNull { it.id == backup.settings.selectedProfileId } ?: backup.profiles.firstOrNull()
@@ -290,7 +293,7 @@ private fun TunnelApp() {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { store.settings(backup.settings.copy(selectedProfileId = profile.id)) }; refresh(); page = 0 } }) { Text("Select") }
                             TextButton(enabled = status.profileId != profile.id || !active, onClick = { editor = profile }) { Text("Edit") }
-                            TextButton(enabled = status.profileId != profile.id || !active, onClick = { scope.launch { withContext(Dispatchers.IO) { store.delete(profile.id) }; refresh() } }) { Text("Delete") }
+                            TextButton(enabled = status.profileId != profile.id || !active, onClick = { deleteCandidate = profile.id }) { Text("Delete") }
                         }
                     } } }
                 }
@@ -352,6 +355,19 @@ private fun TunnelApp() {
                 catch (failure: Exception) { error = failure.message ?: "Could not save profile" }
             }
         }) }
+        deleteCandidate?.let { id -> backup.profiles.firstOrNull { it.id == id } }?.let { profile ->
+            AlertDialog(onDismissRequest = { deleteCandidate = null },
+                title = { Text("Delete ${profile.name}?") },
+                text = { Text("Its configuration and private credentials are permanently removed from this phone. An encrypted backup is the only way to restore them.") },
+                confirmButton = { TextButton(onClick = {
+                    deleteCandidate = null
+                    scope.launch {
+                        try { withContext(Dispatchers.IO) { store.delete(profile.id) }; refresh() }
+                        catch (failure: Exception) { error = failure.message ?: "Could not delete profile" }
+                    }
+                }) { Text("Delete") } },
+                dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") } })
+        }
         error?.let { message -> AlertDialog(onDismissRequest = { error = null }, title = { Text("Action needs attention") }, text = { Text(message) }, confirmButton = { TextButton(onClick = { error = null }) { Text("OK") } }) }
         passwordAction?.let { action -> AlertDialog(onDismissRequest = { password = ""; passwordAction = null; pendingRestore?.fill(0); pendingRestore = null },
             title = { Text(if (action == "export") "Encrypt backup" else "Unlock backup") },

@@ -6,6 +6,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -20,6 +21,7 @@ import android.os.Process
 import io.github.cysin.sslsockspro.R
 import io.github.cysin.sslsockspro.TunnelApplication
 import io.github.cysin.sslsockspro.config.Endpoint
+import io.github.cysin.sslsockspro.config.GatewayPlan
 import io.github.cysin.sslsockspro.config.StunnelDocument
 import io.github.cysin.sslsockspro.data.Credentials
 import io.github.cysin.sslsockspro.data.OpenVpnDocument
@@ -39,9 +41,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
-import java.net.InetAddress
 import java.util.UUID
 
 /** The TUN owner contains no third-party native code. Native engine failure
@@ -152,8 +152,10 @@ class ConnectionService : VpnService() {
             if (isAlwaysOn) { state(ConnectionStage.ERROR, "Always-on VPN is controlled by Android VPN settings."); return START_STICKY }
             disconnect(); return START_NOT_STICKY
         }
-        if (stopJob?.isActive == true) return START_NOT_STICKY
+        // startForegroundService() requires startForeground() even when this
+        // request is dropped while an earlier disconnect is still finishing.
         startForeground(1, notification("Preparing connection"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        if (stopJob?.isActive == true) return START_NOT_STICKY
         if (!registered) {
             manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), networkCallback)
@@ -209,7 +211,7 @@ class ConnectionService : VpnService() {
                 "Android Private DNS is set to a strict provider. Choose Automatic or Off in Android Private DNS settings to use the VPN's encrypted DNS. No DNS was sent directly."
             }
             setUnderlyingNetworks(arrayOf(underlying!!))
-            gateways = withContext(Dispatchers.IO) { resolveGateways(selected, underlying!!) }
+            gateways = withContext(Dispatchers.IO) { resolveGateways(selected, underlying!!).encode() }
             if (selected.mode != ConnectionMode.LOCAL_PROXY && prepare(this) != null) error("Approve the Android VPN permission before connecting")
             if (selected.mode == ConnectionMode.PROXY_VPN) establish(JSONObject())
             if (selected.mode == ConnectionMode.OPENVPN && tun == null) establish(JSONObject())
@@ -231,8 +233,10 @@ class ConnectionService : VpnService() {
 
     @Synchronized private fun establish(configuration: JSONObject) {
         val selected = profile ?: return
-        val builder = Builder().setSession(selected.name).setMtu(configuration.optInt("mtu", 1500).coerceIn(1280, 9000))
-            .setBlocking(false)
+        // A generic session name keeps profile names out of system VPN UI.
+        // Unmetered VPNs inherit meteredness from the underlying network.
+        val builder = Builder().setSession("SSLSocks Pro").setMtu(configuration.optInt("mtu", 1500).coerceIn(1280, 9000))
+            .setBlocking(false).setMetered(false)
         val assigned = selected.mode == ConnectionMode.OPENVPN &&
             (configuration.optString("ipv4").isNotBlank() || configuration.optString("ipv6").isNotBlank())
         val ipv4 = if (assigned) configuration.optString("ipv4") else "198.18.0.1"
@@ -250,7 +254,11 @@ class ConnectionService : VpnService() {
             require(servers.isNotEmpty()) { "OpenVPN needs a DNS server in an assigned address family. Configure dhcp-option DNS or server-pushed DNS." }
             servers.forEach { builder.addDnsServer(it) }
         } else builder.addDnsServer("198.18.0.2")
-        selected.includedApps.forEach { builder.addAllowedApplication(it) }
+        val routed = routedApplications(selected.includedApps) { name ->
+            runCatching { packageManager.getApplicationInfo(name, PackageManager.ApplicationInfoFlags.of(0)) }.isSuccess
+        }
+        (selected.includedApps - routed.toSet()).forEach { TunnelState.log("Skipped a selected app that is not installed: $it") }
+        routed.forEach { builder.addAllowedApplication(it) }
         val replacement = builder.establish() ?: error("Android revoked VPN permission")
         val previous = tun
         tun = replacement
@@ -275,15 +283,16 @@ class ConnectionService : VpnService() {
         if (!retryAllowed) { reconnectJob?.cancel(); reconnectJob = null }
         if (!retryAllowed || profile == null || reconnectJob?.isActive == true) return
         reconnectJob = scope.launch {
-            reconnectEnabled = withContext(Dispatchers.IO) { runCatching { store.read().settings.reconnect }.getOrDefault(false) }
+            // The setting read at connection start decides whether to wait;
+            // it is reread once afterward so a change during the wait counts.
             if (!reconnectEnabled || intentionalStop) { reconnectJob = null; return@launch }
             val delaySeconds = (1L shl retry.coerceAtMost(5)).coerceAtMost(30)
             retry++
             state(ConnectionStage.RECONNECTING, "$message Retrying in $delaySeconds seconds.")
             delay(delaySeconds * 1000)
             reconnectJob = null
-            if (withContext(Dispatchers.IO) { runCatching { store.read().settings.reconnect }.getOrDefault(false) } && !intentionalStop)
-                profile?.id?.let { connect(it) }
+            reconnectEnabled = withContext(Dispatchers.IO) { runCatching { store.read().settings.reconnect }.getOrDefault(false) }
+            if (reconnectEnabled && !intentionalStop) profile?.id?.let { connect(it) }
         }
     }
 
@@ -319,7 +328,7 @@ class ConnectionService : VpnService() {
         manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
     }).firstOrNull()
 
-    private fun resolveGateways(selected: TunnelProfile, network: Network): String {
+    private fun resolveGateways(selected: TunnelProfile, network: Network): GatewayPlan {
         val endpoints = mutableListOf<Endpoint>()
         if (selected.mode != ConnectionMode.OPENVPN || selected.openVpnViaStunnel) {
             val document = StunnelDocument.parse(selected.config)
@@ -328,15 +337,7 @@ class ConnectionService : VpnService() {
         if (selected.mode == ConnectionMode.OPENVPN && !selected.openVpnViaStunnel) {
             endpoints += OpenVpnDocument.remotes(selected.openVpnConfig)
         }
-        require(endpoints.isNotEmpty()) { "Profile has no gateway endpoint" }
-        val result = JSONObject()
-        endpoints.map { it.host }.distinct().forEach { host ->
-            val addresses = network.getAllByName(host)
-            require(addresses.isNotEmpty()) { "Gateway hostname could not be resolved" }
-            result.put(host, addresses.first().hostAddress!!.substringBefore('%'))
-        }
-        result.put("allowed", JSONArray(endpoints.map { "${result.getString(it.host)}|${it.port}" }.distinct()))
-        return result.toString()
+        return GatewayPlan.create(endpoints) { host -> network.getAllByName(host).map { it.hostAddress!! } }
     }
 
     private fun state(stage: ConnectionStage, message: String) {
@@ -416,6 +417,16 @@ class ConnectionService : VpnService() {
     companion object {
         const val STOP = "io.github.cysin.sslsockspro.STOP"
         const val PROFILE = "profile"
+
+        /** Installed selected apps. A selection whose apps are all missing must
+         * fail instead of silently becoming an all-app VPN. */
+        internal fun routedApplications(selected: List<String>, installed: (String) -> Boolean): List<String> {
+            val available = selected.filter(installed)
+            require(selected.isEmpty() || available.isNotEmpty()) {
+                "None of the selected apps are installed. Choose apps again or route all apps."
+            }
+            return available
+        }
         fun start(context: Context, profile: TunnelProfile) = context.startForegroundService(Intent(context, ConnectionService::class.java).putExtra(PROFILE, profile.id))
         fun stop(context: Context) = context.startService(Intent(context, ConnectionService::class.java).setAction(STOP))
     }

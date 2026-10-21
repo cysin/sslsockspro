@@ -119,7 +119,7 @@ object OpenVpnDocument {
         .mapNotNull { it.arguments.firstOrNull() }.distinct()
 
     fun runtime(config: String, credentials: (String) -> String, managementSocket: String,
-                proxy: Pair<String, Endpoint>?, resolvedHosts: Map<String, String> = emptyMap()): String {
+                proxy: Pair<String, Endpoint>?, resolvedHosts: Map<String, List<String>> = emptyMap()): String {
         validate(config)
         val parsed = lines(config)
         val result = StringBuilder()
@@ -127,8 +127,10 @@ object OpenVpnDocument {
         // be configured before the first block, not appended afterward.
         if (proxy != null) result.append("proto tcp-client\n").append(proxy.first).append(' ')
             .append(quoted(proxy.second.host)).append(' ').append(proxy.second.port).append('\n')
+        var connectionBlock = false
         for (line in parsed) {
             val key = line.key
+            when (line.raw.trim()) { "<connection>" -> connectionBlock = true; "</connection>" -> connectionBlock = false }
             when {
                 key in owned || (proxy != null && key == "proto") -> Unit
                 key in fileOptions && line.arguments.isNotEmpty() -> {
@@ -137,10 +139,15 @@ object OpenVpnDocument {
                     result.append('\n')
                 }
                 key == "remote" -> {
-                    result.append("remote ").append(quoted(resolvedHosts[line.arguments[0].removeSurrounding("[", "]")] ?: line.arguments[0]))
-                    line.arguments.drop(1).take(if (proxy == null) 2 else 1).forEach { result.append(' ').append(quoted(it)) }
-                    if (proxy != null) result.append(" tcp-client")
-                    result.append('\n')
+                    // Top-level remotes fail over in order. A connection block
+                    // holds one remote, so it keeps the preferred address.
+                    val addresses = resolvedHosts[line.arguments[0].removeSurrounding("[", "]")] ?: listOf(line.arguments[0])
+                    for (address in if (connectionBlock) addresses.take(1) else addresses) {
+                        result.append("remote ").append(quoted(address))
+                        line.arguments.drop(1).take(if (proxy == null) 2 else 1).forEach { result.append(' ').append(quoted(it)) }
+                        if (proxy != null) result.append(" tcp-client")
+                        result.append('\n')
+                    }
                 }
                 else -> result.append(line.raw).append('\n')
             }

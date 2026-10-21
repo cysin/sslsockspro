@@ -35,8 +35,10 @@ class TunneledDns(endpoint: String, proxy: Endpoint, kind: ProxyKind, private va
                 else -> throw UnknownHostException("Direct DNS lookups are disabled")
             }
         })
-        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
+        // Apps give up on DNS within seconds. A pooled tunnel connection can be
+        // stale after idling; retrying the idempotent query avoids SERVFAIL.
+        .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).callTimeout(8, TimeUnit.SECONDS)
+        .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(true).build()
 
     fun resolve(packet: ByteArray): ByteArray {
         val incoming = Message(packet)
